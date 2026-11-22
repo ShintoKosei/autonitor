@@ -95,7 +95,10 @@ final cacheProvider = FutureProvider.autoDispose<CacheData?>((ref) async {
       temporarilyRestrictedCount: categoryCounts['temporarily_restricted'] ?? 0,
       recoveredCount: categoryCounts['recovered'] ?? 0,
       profileUpdatedCount: categoryCounts['profile_update'] ?? 0,
-      otherReasonsCount: categoryCounts['other_reasons'] ?? 0,
+      otherReasonsCount:
+          (categoryCounts['other_reasons'] ?? 0) +
+          (categoryCounts['unknown_error'] ?? 0) +
+          (categoryCounts['unknown_gql_response'] ?? 0),
       lastRunId: latestLog.runId,
     );
   } catch (e, s) {

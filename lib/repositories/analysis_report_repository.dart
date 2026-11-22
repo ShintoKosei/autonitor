@@ -95,7 +95,13 @@ class AnalysisReportRepository {
         ..addColumns([countExp])
         ..where(
           _database.changeReports.ownerId.equals(ownerId) &
-              _database.changeReports.changeType.equals(categoryKey),
+              (categoryKey == 'other_reasons'
+                  ? _database.changeReports.changeType.isIn(const [
+                      'other_reasons',
+                      'unknown_error',
+                      'unknown_gql_response',
+                    ])
+                  : _database.changeReports.changeType.equals(categoryKey)),
         );
       final result = await query.getSingle();
       return result.read(countExp) ?? 0;
@@ -167,7 +173,13 @@ class AnalysisReportRepository {
           ..where(
             (tbl) =>
                 tbl.ownerId.equals(ownerId) &
-                tbl.changeType.equals(categoryKey),
+                (categoryKey == 'other_reasons'
+                    ? tbl.changeType.isIn(const [
+                        'other_reasons',
+                        'unknown_error',
+                        'unknown_gql_response',
+                      ])
+                    : tbl.changeType.equals(categoryKey)),
           )
           ..orderBy([
             (t) =>

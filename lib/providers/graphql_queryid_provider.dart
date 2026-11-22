@@ -19,12 +19,12 @@ const List<String> _targetOperations = [
 // 辅助函数：生成默认路径（与 Service 中的默认值保持一致）
 Map<String, String> _getDefaultQueryIds() {
   return {
-    'UserByRestId': 'Bbaot8ySMtJD7K2t01gW7A',
-    'UsersByRestIds': 'xavgLWWbFH8wm_8MQN8plQ',
-    'UserByScreenName': 'oaLodhGbbnzJBACb1kk2Q',
-    'UsersByScreenNames': 'ujL_oXbgVlDHQzWSTgzvnA',
-    'Followers': 'oQWxG6XdR5SPvMBsPiKUPQ',
-    'Following': 'i2GOldCH2D3OUEhAdimLrA',
+    'UserByRestId': 'mxaYWwt52eAb6OAzYHMVzg',
+    'UsersByRestIds': 'ubfbnAM4qTlMTOYleYhXSg',
+    'UserByScreenName': 'AMIBMjtxEEATh4z8V9GtRg',
+    'UsersByScreenNames': 'cACg_kWQkzNQ74lcK5rksQ',
+    'Followers': 'Xe3y9_ndZ9-RtWz8zd_wpg',
+    'Following': 'eDqlbOS46zda8jDT8dEQ_Q',
   };
 }
 
@@ -83,8 +83,14 @@ class GqlQueryIdNotifier extends StateNotifier<GqlQueryIdState> {
         final newCustomQueryIds = _ensureAllQueryIdsExist(
           settings.customGqlQueryIds,
         );
+        final existingOpsByName = {
+          for (final op in state.apiOperations) op.operationName: op,
+        };
         final List<GraphQLOperation> persistedApiOps =
-            _convertPersistedQueryIdsToOperations(newCustomQueryIds);
+            _convertPersistedQueryIdsToOperations(
+              newCustomQueryIds,
+              existingOpsByName: existingOpsByName,
+            );
         // 从 Settings 中读取 source
         state = state.copyWith(
           customQueryIds: newCustomQueryIds,
@@ -132,13 +138,22 @@ class GqlQueryIdNotifier extends StateNotifier<GqlQueryIdState> {
   }
 
   List<GraphQLOperation> _convertPersistedQueryIdsToOperations(
-    Map<String, String> paths,
-  ) {
+    Map<String, String> paths, {
+    Map<String, GraphQLOperation> existingOpsByName = const {},
+  }) {
     final List<GraphQLOperation> ops = [];
     for (final opName in _targetOperations) {
       final queryId = paths[opName];
       if (queryId != null && queryId.isNotEmpty) {
-        ops.add(GraphQLOperation(queryId: queryId, operationName: opName));
+        final existing = existingOpsByName[opName];
+        ops.add(
+          GraphQLOperation(
+            queryId: queryId,
+            operationName: opName,
+            featureSwitches: existing?.featureSwitches ?? const [],
+            fieldToggles: existing?.fieldToggles ?? const [],
+          ),
+        );
       }
     }
     return ops;
@@ -165,21 +180,16 @@ class GqlQueryIdNotifier extends StateNotifier<GqlQueryIdState> {
 
     try {
       final operations = await _graphQLApiService.fetchAndParseOperations();
-      final Map<String, String> newApiQueryIds = {
+      final Map<String, String> newApiQueryIds = _ensureAllQueryIdsExist({
         for (var op in operations) op.operationName: op.queryId,
-      };
-      _ref
+      });
+      await _ref
           .read(settingsProvider.notifier)
           .updateCustomGqlQueryIds(newApiQueryIds);
 
       state = state.copyWith(
         apiOperations: operations,
-        isLoading: false,
-        error: null,
-        isApiDataLoaded: true, // 成功加载
-      );
-      state = state.copyWith(
-        apiOperations: operations,
+        customQueryIds: newApiQueryIds,
         isLoading: false,
         error: null,
         isApiDataLoaded: true, // 成功加载
@@ -282,13 +292,66 @@ class GqlQueryIdNotifier extends StateNotifier<GqlQueryIdState> {
     }
   }
 
+  /// Silently refreshes GraphQL operations (QueryIds + feature metadata) from
+  /// the TIAD API document when [QueryIdSource.apiDocument] is active.
+  /// Failures are logged without clearing cached/default QueryIds.
+  Future<bool> refreshApiDataSilently() async {
+    if (state.source != QueryIdSource.apiDocument) {
+      return false;
+    }
+    try {
+      final operations = await _graphQLApiService.fetchAndParseOperations();
+      if (operations.isEmpty) {
+        return false;
+      }
+      final Map<String, String> newApiQueryIds = _ensureAllQueryIdsExist({
+        for (var op in operations) op.operationName: op.queryId,
+      });
+      await _ref
+          .read(settingsProvider.notifier)
+          .updateCustomGqlQueryIds(newApiQueryIds);
+
+      state = state.copyWith(
+        apiOperations: operations,
+        customQueryIds: newApiQueryIds,
+        isLoading: false,
+        error: null,
+        isApiDataLoaded: true,
+      );
+      return true;
+    } catch (e, s) {
+      logger.w(
+        "Silent refresh of GraphQL API paths failed; falling back to cached/default QueryIds: $e",
+        error: e,
+        stackTrace: s,
+      );
+      return false;
+    }
+  }
+
+  List<String> getFeatureSwitches(String operationName) {
+    for (final op in state.apiOperations) {
+      if (op.operationName == operationName) {
+        return op.featureSwitches;
+      }
+    }
+    return const [];
+  }
+
+  List<String> getFieldToggles(String operationName) {
+    for (final op in state.apiOperations) {
+      if (op.operationName == operationName) {
+        return op.fieldToggles;
+      }
+    }
+    return const [];
+  }
+
   List<String> get targetOperations => _targetOperations;
 }
 
 final gqlQueryIdProvider =
-    StateNotifierProvider.autoDispose<GqlQueryIdNotifier, GqlQueryIdState>((
-      ref,
-    ) {
+    StateNotifierProvider<GqlQueryIdNotifier, GqlQueryIdState>((ref) {
       return GqlQueryIdNotifier(
         ref,
         ref.read(graphQLServiceProvider), // 来自 graphql_path_service.dart

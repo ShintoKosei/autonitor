@@ -188,9 +188,16 @@ class NewNetworkDataFetcher {
         'Prepared batch of ${batchNames.length} screen names (indices $i..${end - 1}).',
       );
       await _checkPauseCallback();
-      final usersByScreenNamesQueryId = _ref
-          .read(gqlQueryIdProvider.notifier)
-          .getCurrentQueryIdForDisplay('UsersByScreenNames');
+      final gqlNotifier = _ref.read(gqlQueryIdProvider.notifier);
+      final usersByScreenNamesQueryId = gqlNotifier.getCurrentQueryIdForDisplay(
+        'UsersByScreenNames',
+      );
+      final usersByScreenNamesFeatures = gqlNotifier.getFeatureSwitches(
+        'UsersByScreenNames',
+      );
+      final usersByScreenNamesToggles = gqlNotifier.getFieldToggles(
+        'UsersByScreenNames',
+      );
       final transactionId = await _ref
           .read(transactionIdProvider.notifier)
           .generate(
@@ -211,6 +218,8 @@ class NewNetworkDataFetcher {
             _ownerCookie,
             usersByScreenNamesQueryId,
             transactionId,
+            extraFeatureSwitches: usersByScreenNamesFeatures,
+            extraFieldToggles: usersByScreenNamesToggles,
             apiRequestMode: _apiRequestMode,
             cffiUrl: _cffiUrl,
             cffiApiKey: _cffiApiKey,
@@ -227,6 +236,7 @@ class NewNetworkDataFetcher {
       }
 
       int convertedCount = 0;
+      int skippedCount = 0;
       // UsersByScreenNames: data.users -> [{ result: ... }]. A malformed
       // response is not replaced with placeholder values, because doing so
       // silently erases profile fields from otherwise valid existing rows.
@@ -239,9 +249,8 @@ class NewNetworkDataFetcher {
 
       for (final profileJson in usersData) {
         if (profileJson is! Map) {
-          throw const FormatException(
-            'UsersByScreenNames contains an invalid user entry.',
-          );
+          skippedCount++;
+          continue;
         }
 
         final user = TwitterUser.fromGraphQLUsersByScreenNames(
@@ -249,17 +258,17 @@ class NewNetworkDataFetcher {
           currentRunId,
         );
         if (user.restId.isEmpty) {
-          throw const FormatException(
-            'UsersByScreenNames contains a user without a rest ID.',
-          );
+          skippedCount++;
+          continue;
         }
 
         newUsers[user.restId] = user;
         convertedCount++;
       }
       _log(
-        'Converted $convertedCount user profiles in batch '
-        '${i ~/ screenNamesChunkSize + 1}.',
+        'Converted $convertedCount user profiles'
+        '${skippedCount > 0 ? ' (skipped $skippedCount unavailable/empty entries)' : ''}'
+        ' in batch ${i ~/ screenNamesChunkSize + 1}.',
       );
       profileBatch++;
       _onProgress?.call(

@@ -231,6 +231,29 @@ _PrepareDataResult _prepareDatabaseData(_PrepareDataParams params) {
 
     final oldRel = params.oldRelationsMap[id];
 
+    // Persist kept_ids_status transitions (e.g. temporarily_restricted,
+    // oneway_unfollowed, recovered) so subsequent syncs and search filters
+    // observe the updated status.
+    final keptStatusUpdate = params.analysisResult.keptUserStatusUpdates[id];
+    if (keptStatusUpdate != null) {
+      newUser = newUser.copyWith(
+        keptIdsStatus: keptStatusUpdate == 'recovered'
+            ? 'normal'
+            : keptStatusUpdate,
+      );
+    } else if (oldRel?.latestRawJson != null &&
+        params.networkData.uniqueUsers.containsKey(id)) {
+      try {
+        final oldJson = jsonDecode(oldRel!.latestRawJson!);
+        final prevKeptStatus = oldJson['kept_ids_status'] as String?;
+        if (prevKeptStatus != null &&
+            prevKeptStatus.isNotEmpty &&
+            prevKeptStatus != 'normal') {
+          newUser = newUser.copyWith(keptIdsStatus: prevKeptStatus);
+        }
+      } catch (_) {}
+    }
+
     // Fast and Fastest do not guarantee expert-only profile metadata for
     // every relationship. Keep previously collected values when absent; an
     // Expert response may still deliberately clear or change them.

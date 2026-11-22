@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'package:autonitor/models/twitter_user.dart';
 import 'package:autonitor/services/x_client_transaction_service.dart';
 import 'package:drift/drift.dart';
@@ -98,6 +99,7 @@ class RelationshipAnalyzer {
   final String? _cffiUrl;
   final String? _cffiApiKey;
   final SyncProgressCallback? _onProgress;
+  final Future<void> Function(DateTime resetAt)? _waitForRateLimit;
 
   RelationshipAnalyzer({
     required TwitterApiService apiServiceGql,
@@ -111,6 +113,7 @@ class RelationshipAnalyzer {
     String? cffiUrl,
     String? cffiApiKey,
     SyncProgressCallback? onProgress,
+    Future<void> Function(DateTime resetAt)? waitForRateLimit,
   }) : _apiServiceGql = apiServiceGql,
        _accountRepository = accountRepository,
        _ownerId = ownerId,
@@ -121,7 +124,8 @@ class RelationshipAnalyzer {
        _apiRequestMode = apiRequestMode,
        _cffiUrl = cffiUrl,
        _cffiApiKey = cffiApiKey,
-       _onProgress = onProgress;
+       _onProgress = onProgress,
+       _waitForRateLimit = waitForRateLimit;
 
   Future<RelationshipAnalysisResult> analyze({
     required Map<String, FollowUser> oldRelationsMap,
@@ -191,6 +195,54 @@ class RelationshipAnalyzer {
     );
   }
 
+  Future<T> _retryAfterRateLimit<T>(Future<T> Function() request) async {
+    while (true) {
+      try {
+        return await request();
+      } on GraphQlRateLimitException catch (error) {
+        final resetAt = error.resetAt;
+        if (resetAt == null || _waitForRateLimit == null) rethrow;
+        _log('GQL rate limited. Waiting until $resetAt before retrying.');
+        await _waitForRateLimit(resetAt);
+      }
+    }
+  }
+
+  String _classifyGqlUserResult(dynamic result) {
+    if (result == null || (result is Map && result.isEmpty)) {
+      return 'deactivated';
+    }
+    if (result is! Map) {
+      return 'other_reasons';
+    }
+    final String? typename = result['__typename'] as String?;
+    final String? message = result['message'] as String?;
+    final String? reason = result['reason'] as String?;
+
+    if (typename == 'User') {
+      final legacy = result['legacy'];
+      final interstitial = legacy is Map
+          ? legacy['profile_interstitial_type'] as String?
+          : null;
+      return (interstitial != null && interstitial.isNotEmpty)
+          ? 'temporarily_restricted'
+          : 'normal_unfollowed';
+    } else if (typename == 'UserUnavailable') {
+      final lowerMsg = message?.toLowerCase() ?? '';
+      final lowerReason = reason?.toLowerCase() ?? '';
+      if (lowerMsg.contains('suspended') || lowerReason.contains('suspended')) {
+        return 'suspended';
+      } else if (lowerMsg.contains('deactivated') ||
+          lowerReason.contains('deactivated') ||
+          lowerReason.contains('offboarded')) {
+        return 'deactivated';
+      } else {
+        return 'suspended'; // 默认回退逻辑
+      }
+    }
+    return 'other_reasons';
+  }
+
   Future<Map<String, String>> _categorizeRemovals(Set<String> ids) async {
     final Map<String, String> results = {};
     if (ids.isEmpty) return results;
@@ -201,107 +253,116 @@ class RelationshipAnalyzer {
       await _checkPauseCallback();
       try {
         final queryId = _accountRepository.getCurrentQueryId('UserByRestId');
-        final Map<String, dynamic> gqlJson = await _apiServiceGql
-            .getUserByRestId(
-              removedId,
-              _ownerCookie,
-              queryId,
-              apiRequestMode: _apiRequestMode,
-              cffiUrl: _cffiUrl,
-              cffiApiKey: _cffiApiKey,
-            );
-        final result = gqlJson['data']?['user']?['result'];
-        final typename = result?['__typename'];
-        final message = result?['message'] as String?;
-
-        if (typename == 'User') {
-          final legacy = result['legacy'];
-          final interstitial = legacy?['profile_interstitial_type'] as String?;
-          results[removedId] = (interstitial != null && interstitial.isNotEmpty)
-              ? 'temporarily_restricted'
-              : 'normal_unfollowed';
-        } else if (typename == 'UserUnavailable') {
-          if (message == 'User is suspended') {
-            results[removedId] = 'suspended';
-          } else if (message == 'User is deactivated') {
-            results[removedId] = 'deactivated';
-          } else {
-            results[removedId] = 'suspended'; // 默认回退逻辑
-          }
-        } else if (gqlJson['data']?['user'] == null ||
-            (gqlJson['data']?['user'] is Map &&
-                (gqlJson['data']['user'] as Map).isEmpty)) {
+        final featureSwitches = _accountRepository.getFeatureSwitches(
+          'UserByRestId',
+        );
+        final fieldToggles = _accountRepository.getFieldToggles('UserByRestId');
+        final transactionId = _xctService?.generateTransactionId(
+          method: "GET",
+          url: 'https://api.x.com/graphql/$queryId/UserByRestId',
+        );
+        final Map<String, dynamic> gqlJson = await _retryAfterRateLimit(
+          () => _apiServiceGql.getUserByRestId(
+            removedId,
+            _ownerCookie,
+            queryId,
+            transactionId: transactionId,
+            extraFeatureSwitches: featureSwitches,
+            extraFieldToggles: fieldToggles,
+            apiRequestMode: _apiRequestMode,
+            cffiUrl: _cffiUrl,
+            cffiApiKey: _cffiApiKey,
+          ),
+        );
+        final dynamic userNode = gqlJson['data']?['user'];
+        if (userNode == null || (userNode is Map && userNode.isEmpty)) {
           results[removedId] = 'deactivated';
         } else {
-          results[removedId] = 'other_reasons';
+          results[removedId] = _classifyGqlUserResult(userNode['result']);
         }
       } catch (e) {
         _log("Error fetching single user $removedId: $e");
-        results[removedId] = 'unknown_error';
+        results[removedId] = 'other_reasons';
       }
       return results;
     }
 
     _log("Batch fetching status for ${ids.length} users...");
-    await _checkPauseCallback();
-    try {
-      final queryId = _accountRepository.getCurrentQueryId('UsersByRestIds');
-      final transactionId = _xctService?.generateTransactionId(
-        method: "GET",
-        url: 'https://api.x.com/graphql/$queryId/UsersByRestIds',
-      );
-      if (transactionId == null) {
-        _log('Transaction ID unavailable; using UsersByRestIds without it.');
-      }
-      final List<String> idList = ids.toList();
-      final Map<String, dynamic> gqlJson = await _apiServiceGql
-          .getUsersByRestIds(
+    final queryId = _accountRepository.getCurrentQueryId('UsersByRestIds');
+    final featureSwitches = _accountRepository.getFeatureSwitches(
+      'UsersByRestIds',
+    );
+    final fieldToggles = _accountRepository.getFieldToggles('UsersByRestIds');
+    final List<String> allIdList = ids.toList();
+    const int batchSize = 100;
+
+    for (int start = 0; start < allIdList.length; start += batchSize) {
+      await _checkPauseCallback();
+      final int end = min(start + batchSize, allIdList.length);
+      final List<String> idList = allIdList.sublist(start, end);
+      try {
+        final transactionId = _xctService?.generateTransactionId(
+          method: "GET",
+          url: 'https://api.x.com/graphql/$queryId/UsersByRestIds',
+        );
+        if (transactionId == null) {
+          _log('Transaction ID unavailable; using UsersByRestIds without it.');
+        }
+        final Map<String, dynamic> gqlJson = await _retryAfterRateLimit(
+          () => _apiServiceGql.getUsersByRestIds(
             idList,
             _ownerCookie,
             queryId,
             transactionId,
+            extraFeatureSwitches: featureSwitches,
+            extraFieldToggles: fieldToggles,
             apiRequestMode: _apiRequestMode,
             cffiUrl: _cffiUrl,
             cffiApiKey: _cffiApiKey,
-          );
-      final List<dynamic>? usersData = gqlJson['data']?['users'];
-
-      for (int i = 0; i < idList.length; i++) {
-        final String currentId = idList[i];
-        dynamic result;
-        if (usersData != null && i < usersData.length) {
-          result = usersData[i]?['result'];
-        }
-
-        if (result == null) {
-          results[currentId] = 'deactivated';
+          ),
+        );
+        final List<dynamic>? usersData = gqlJson['data']?['users'];
+        if (usersData == null) {
+          _log("UsersByRestIds returned null 'data.users' for batch $start..${end - 1}.");
+          for (final id in idList) {
+            results[id] = 'other_reasons';
+          }
           continue;
         }
 
-        final String? typename = result['__typename'];
-        final String? message = result['message'] as String?;
-        if (typename == 'User') {
-          final legacy = result['legacy'];
-          final interstitial = legacy?['profile_interstitial_type'] as String?;
-          results[currentId] = (interstitial != null && interstitial.isNotEmpty)
-              ? 'temporarily_restricted'
-              : 'normal_unfollowed';
-        } else if (typename == 'UserUnavailable') {
-          if (message == 'User is suspended') {
-            results[currentId] = 'suspended';
-          } else if (message == 'User is deactivated') {
-            results[currentId] = 'deactivated';
-          } else {
-            results[currentId] = 'suspended';
+        final Map<String, dynamic> resultsByRestId = {};
+        for (final entry in usersData) {
+          final dynamic result = entry is Map ? entry['result'] : null;
+          if (result is Map) {
+            final restId = result['rest_id']?.toString();
+            if (restId != null && restId.isNotEmpty) {
+              resultsByRestId[restId] = result;
+            }
           }
-        } else {
-          results[currentId] = 'unknown_gql_response';
         }
-      }
-    } catch (e) {
-      _log("Batch fetch error: $e");
-      for (final id in ids) {
-        results[id] = 'unknown_error';
+
+        for (int i = 0; i < idList.length; i++) {
+          final String currentId = idList[i];
+          dynamic result = resultsByRestId[currentId];
+          if (result == null && i < usersData.length) {
+            final entry = usersData[i];
+            final positionalResult = entry is Map ? entry['result'] : null;
+            final positionalRestId = positionalResult is Map
+                ? positionalResult['rest_id']?.toString()
+                : null;
+            if (positionalRestId == null ||
+                positionalRestId.isEmpty ||
+                positionalRestId == currentId) {
+              result = positionalResult;
+            }
+          }
+          results[currentId] = _classifyGqlUserResult(result);
+        }
+      } catch (e) {
+        _log("Batch fetch error ($start..${end - 1}): $e");
+        for (final id in idList) {
+          results[id] = 'other_reasons';
+        }
       }
     }
     return results;

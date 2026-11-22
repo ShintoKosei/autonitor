@@ -210,9 +210,10 @@ class AccountRepository {
     bool isProtected = false;
 
     try {
-      final queryId = _ref
-          .read(gqlQueryIdProvider.notifier)
-          .getCurrentQueryIdForDisplay('UserByRestId');
+      final gqlNotifier = _ref.read(gqlQueryIdProvider.notifier);
+      final queryId = gqlNotifier.getCurrentQueryIdForDisplay('UserByRestId');
+      final featureSwitches = gqlNotifier.getFeatureSwitches('UserByRestId');
+      final fieldToggles = gqlNotifier.getFieldToggles('UserByRestId');
       final settings = _ref.read(settingsProvider).valueOrNull ?? AppSettings();
 
       // 1. 获取原始 API 数据
@@ -221,6 +222,8 @@ class AccountRepository {
             id,
             cookie,
             queryId,
+            extraFeatureSwitches: featureSwitches,
+            extraFieldToggles: fieldToggles,
             apiRequestMode: settings.apiRequestMode,
             cffiUrl: settings.remoteFastApiUrl,
             cffiApiKey: settings.fastApiApiKey,
@@ -442,5 +445,17 @@ class AccountRepository {
     return _ref
         .read(gqlQueryIdProvider.notifier)
         .getCurrentQueryIdForDisplay(operationName);
+  }
+
+  List<String> getFeatureSwitches(String operationName) {
+    return _ref
+        .read(gqlQueryIdProvider.notifier)
+        .getFeatureSwitches(operationName);
+  }
+
+  List<String> getFieldToggles(String operationName) {
+    return _ref
+        .read(gqlQueryIdProvider.notifier)
+        .getFieldToggles(operationName);
   }
 }

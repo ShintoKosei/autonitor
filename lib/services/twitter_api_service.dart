@@ -163,10 +163,26 @@ class TwitterApiService {
     }
   }
 
+  Map<String, bool> _mergeBooleanFlags(
+    Map<String, bool> base,
+    List<String>? extraKeys, {
+    bool defaultValue = false,
+  }) {
+    if (extraKeys == null || extraKeys.isEmpty) return base;
+    final merged = Map<String, bool>.from(base);
+    for (final key in extraKeys) {
+      merged.putIfAbsent(key, () => defaultValue);
+    }
+    return merged;
+  }
+
   Future<Map<String, dynamic>> getUserByRestId(
     String userId,
     String cookie,
     String queryId, {
+    String? transactionId,
+    List<String>? extraFeatureSwitches,
+    List<String>? extraFieldToggles,
     String apiRequestMode = 'dio',
     String? cffiUrl,
     String? cffiApiKey,
@@ -182,7 +198,7 @@ class TwitterApiService {
       "withSafetyModeUserFields": true,
     };
 
-    final features = {
+    final features = _mergeBooleanFlags({
       "hidden_profile_subscriptions_enabled": true,
       "profile_label_improvements_pcf_label_in_post_enabled": true,
       "responsive_web_profile_redirect_enabled": true,
@@ -198,12 +214,13 @@ class TwitterApiService {
       "responsive_web_graphql_timeline_navigation_enabled": true,
       "payments_enabled": true,
       "responsive_web_graphql_exclude_directive_enabled": true,
-    };
+    }, extraFeatureSwitches);
 
-    final fieldToggles = {
+    final fieldToggles = _mergeBooleanFlags({
       "withPayments": true,
+      "withDmBlocks": true,
       "withAuxiliaryUserLabels": true,
-    };
+    }, extraFieldToggles);
 
     final queryParameters = {
       'variables': jsonEncode(variables),
@@ -223,6 +240,9 @@ class TwitterApiService {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
       'Referer': 'https://api.x.com/',
     };
+    if (transactionId != null && transactionId.isNotEmpty) {
+      headers['x-client-transaction-id'] = transactionId;
+    }
 
     final String url = 'https://api.x.com/graphql/$queryId/UserByRestId';
 
@@ -264,6 +284,8 @@ class TwitterApiService {
     String cookie,
     String queryId,
     String? transactionId, {
+    List<String>? extraFeatureSwitches,
+    List<String>? extraFieldToggles,
     String apiRequestMode = 'dio',
     String? cffiUrl,
     String? cffiApiKey,
@@ -279,7 +301,7 @@ class TwitterApiService {
       "withSafetyModeUserFields": true,
     };
 
-    final features = {
+    final features = _mergeBooleanFlags({
       "hidden_profile_subscriptions_enabled": true,
       "profile_label_improvements_pcf_label_in_post_enabled": true,
       "responsive_web_profile_redirect_enabled": false,
@@ -294,12 +316,13 @@ class TwitterApiService {
       "responsive_web_graphql_timeline_navigation_enabled": true,
       "responsive_web_grok_annotations_enabled": false,
       "post_ctas_fetch_enabled": false,
-    };
+    }, extraFeatureSwitches);
 
-    final fieldToggles = {
+    final fieldToggles = _mergeBooleanFlags({
       "withPayments": true,
+      "withDmBlocks": true,
       "withAuxiliaryUserLabels": true,
-    };
+    }, extraFieldToggles);
 
     final queryParameters = {
       'variables': jsonEncode(variables),
@@ -363,6 +386,8 @@ class TwitterApiService {
     String cookie,
     String queryId,
     String? transactionId, {
+    List<String>? extraFeatureSwitches,
+    List<String>? extraFieldToggles,
     String apiRequestMode = 'curl_cffi',
     String? cffiUrl,
     String? cffiApiKey,
@@ -377,15 +402,29 @@ class TwitterApiService {
       "withSafetyModeUserFields": true,
     };
 
-    final features = {
-      "responsive_web_graphql_exclude_directive_enabled": true,
+    final features = _mergeBooleanFlags({
+      "hidden_profile_subscriptions_enabled": true,
+      "profile_label_improvements_pcf_label_in_post_enabled": true,
+      "responsive_web_profile_redirect_enabled": false,
+      "rweb_tipjar_consumption_enabled": false,
       "verified_phone_label_enabled": false,
+      "subscriptions_verification_info_is_identity_verified_enabled": true,
+      "subscriptions_verification_info_verified_since_enabled": true,
+      "highlights_tweets_tab_ui_enabled": true,
+      "responsive_web_twitter_article_notes_tab_enabled": true,
+      "subscriptions_feature_can_gift_premium": true,
+      "creator_subscriptions_tweet_preview_api_enabled": true,
+      "responsive_web_graphql_exclude_directive_enabled": true,
       "responsive_web_graphql_skip_user_profile_image_extensions_enabled":
           false,
       "responsive_web_graphql_timeline_navigation_enabled": true,
-    };
+    }, extraFeatureSwitches);
 
-    final fieldToggles = {"withAuxiliaryUserLabels": false};
+    final fieldToggles = _mergeBooleanFlags({
+      "withPayments": false,
+      "withDmBlocks": false,
+      "withAuxiliaryUserLabels": false,
+    }, extraFieldToggles);
 
     final queryParameters = {
       'variables': jsonEncode(variables),
@@ -449,12 +488,81 @@ class TwitterApiService {
     }
   }
 
+  static const Map<String, bool> _timelineDefaultFeatures = {
+    "rweb_video_screen_enabled": true,
+    "rweb_cashtags_enabled": true,
+    "profile_label_improvements_pcf_label_in_post_enabled": true,
+    "responsive_web_profile_redirect_enabled": true,
+    "rweb_tipjar_consumption_enabled": true,
+    "verified_phone_label_enabled": true,
+    "creator_subscriptions_tweet_preview_api_enabled": true,
+    "responsive_web_graphql_timeline_navigation_enabled": true,
+    "premium_content_api_read_enabled": true,
+    "communities_web_enable_tweet_community_results_fetch": true,
+    "c9s_tweet_anatomy_moderator_badge_enabled": true,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": true,
+    "responsive_web_grok_analyze_post_followups_enabled": true,
+    "rweb_cashtags_composer_attachment_enabled": true,
+    "responsive_web_jetfuel_frame": true,
+    "rweb_sports_post_context_enabled": true,
+    "x_elections_post_context_enabled": true,
+    "responsive_web_grok_share_attachment_enabled": true,
+    "responsive_web_grok_annotations_enabled": false,
+    "articles_preview_enabled": true,
+    "responsive_web_edit_tweet_api_enabled": true,
+    "rweb_conversational_replies_downvote_enabled": true,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
+    "view_counts_everywhere_api_enabled": true,
+    "longform_notetweets_consumption_enabled": true,
+    "responsive_web_twitter_article_tweet_consumption_enabled": true,
+    "content_disclosure_indicator_enabled": true,
+    "content_disclosure_ai_generated_indicator_enabled": true,
+    "responsive_web_grok_show_grok_translated_post": true,
+    "responsive_web_grok_analysis_button_from_backend": true,
+    "post_ctas_fetch_enabled": false,
+    "freedom_of_speech_not_reach_fetch_enabled": true,
+    "standardized_nudges_misinfo": true,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":
+        true,
+    "longform_notetweets_rich_text_read_enabled": true,
+    "longform_notetweets_inline_media_enabled": true,
+    "responsive_web_nested_quote_preview_enabled": true,
+    "responsive_web_grok_image_annotation_enabled": true,
+    "responsive_web_grok_imagine_annotation_enabled": true,
+    "responsive_web_made_on_x_label_enabled": true,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": true,
+    "responsive_web_enhance_cards_enabled": true,
+    "hidden_profile_subscriptions_enabled": true,
+    "responsive_web_graphql_exclude_directive_enabled": true,
+    "highlights_tweets_tab_ui_enabled": true,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": true,
+    "subscriptions_feature_can_gift_premium": true,
+    "payments_enabled": true,
+    "responsive_web_twitter_article_notes_tab_enabled": true,
+    "tweet_awards_web_tipping_enabled": true,
+    "creator_subscriptions_quote_tweet_preview_enabled": true,
+  };
+
+  static const Map<String, bool> _timelineDefaultFieldToggles = {
+    "withPayments": false,
+    "withDmBlocks": false,
+    "withAuxiliaryUserLabels": true,
+    "withArticleRichContentState": true,
+    "withArticlePlainText": false,
+    "withArticleSummaryText": true,
+    "withArticleVoiceOver": true,
+    "withGrokAnalyze": false,
+    "withDisallowedReplyControls": false,
+  };
+
   Future<Map<String, dynamic>> getFollowers(
     String userId,
     String cookie,
     String? transactionId,
     String cursor,
     String queryId, {
+    List<String>? extraFeatureSwitches,
+    List<String>? extraFieldToggles,
     String apiRequestMode = 'dio',
     String? cffiUrl,
     String? cffiApiKey,
@@ -472,28 +580,19 @@ class TwitterApiService {
       "cursor": cursor,
     };
 
-    final features = {
-      "hidden_profile_subscriptions_enabled": true,
-      "responsive_web_graphql_exclude_directive_enabled": true,
-      "verified_phone_label_enabled": false,
-      "highlights_tweets_tab_ui_enabled": true,
-      "creator_subscriptions_tweet_preview_api_enabled": true,
-      "responsive_web_graphql_skip_user_profile_image_extensions_enabled":
-          false,
-      "responsive_web_graphql_timeline_navigation_enabled": true,
-      "rweb_tipjar_consumption_enabled": false,
-      "subscriptions_feature_can_gift_premium": false,
-      "payments_enabled": false,
-      "responsive_web_twitter_article_notes_tab_enabled": false,
-      "profile_label_improvements_pcf_label_in_post_enabled": false,
-      "responsive_web_profile_redirect_enabled": false,
-      "responsive_web_grok_annotations_enabled": false,
-      "post_ctas_fetch_enabled": false,
-    };
+    final features = _mergeBooleanFlags(
+      _timelineDefaultFeatures,
+      extraFeatureSwitches,
+    );
+    final fieldToggles = _mergeBooleanFlags(
+      _timelineDefaultFieldToggles,
+      extraFieldToggles,
+    );
 
     final queryParameters = {
       'variables': jsonEncode(variables),
       'features': jsonEncode(features),
+      'fieldToggles': jsonEncode(fieldToggles),
     };
 
     final headers = {
@@ -553,6 +652,8 @@ class TwitterApiService {
     String? transactionId,
     String cursor,
     String queryId, {
+    List<String>? extraFeatureSwitches,
+    List<String>? extraFieldToggles,
     String apiRequestMode = 'dio',
     String? cffiUrl,
     String? cffiApiKey,
@@ -570,55 +671,19 @@ class TwitterApiService {
       "cursor": cursor,
     };
 
-    final features = {
-      "hidden_profile_subscriptions_enabled": true,
-      "responsive_web_graphql_exclude_directive_enabled": true,
-      "verified_phone_label_enabled": true,
-      "highlights_tweets_tab_ui_enabled": true,
-      "creator_subscriptions_tweet_preview_api_enabled": true,
-      "responsive_web_graphql_skip_user_profile_image_extensions_enabled": true,
-      "responsive_web_graphql_timeline_navigation_enabled": true,
-      "rweb_tipjar_consumption_enabled": true,
-      "subscriptions_feature_can_gift_premium": true,
-      "payments_enabled": true,
-      "responsive_web_twitter_article_notes_tab_enabled": true,
-      "profile_label_improvements_pcf_label_in_post_enabled": true,
-      "responsive_web_profile_redirect_enabled": true,
-      "responsive_web_grok_image_annotation_enabled": true,
-      "freedom_of_speech_not_reach_fetch_enabled": true,
-      "graphql_is_translatable_rweb_tweet_is_translatable_enabled": true,
-      "responsive_web_grok_analyze_post_followups_enabled": true,
-      "responsive_web_grok_community_note_auto_translation_is_enabled": true,
-      "responsive_web_edit_tweet_api_enabled": true,
-      "tweet_awards_web_tipping_enabled": true,
-      "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":
-          true,
-      "responsive_web_grok_share_attachment_enabled": true,
-      "responsive_web_grok_analyze_button_fetch_trends_enabled": true,
-      "premium_content_api_read_enabled": true,
-      "responsive_web_twitter_article_tweet_consumption_enabled": true,
-      "communities_web_enable_tweet_community_results_fetch": true,
-      "longform_notetweets_rich_text_read_enabled": true,
-      "rweb_video_screen_enabled": true,
-      "responsive_web_grok_show_grok_translated_post": true,
-      "c9s_tweet_anatomy_moderator_badge_enabled": true,
-      "articles_preview_enabled": true,
-      "responsive_web_enhance_cards_enabled": true,
-      "view_counts_everywhere_api_enabled": true,
-      "creator_subscriptions_quote_tweet_preview_enabled": true,
-      "responsive_web_grok_analysis_button_from_backend": true,
-      "standardized_nudges_misinfo": true,
-      "longform_notetweets_inline_media_enabled": true,
-      "responsive_web_grok_imagine_annotation_enabled": true,
-      "longform_notetweets_consumption_enabled": true,
-      "responsive_web_jetfuel_frame": true,
-      "responsive_web_grok_annotations_enabled": false,
-      "post_ctas_fetch_enabled": false,
-    };
+    final features = _mergeBooleanFlags(
+      _timelineDefaultFeatures,
+      extraFeatureSwitches,
+    );
+    final fieldToggles = _mergeBooleanFlags(
+      _timelineDefaultFieldToggles,
+      extraFieldToggles,
+    );
 
     final queryParameters = {
       'variables': jsonEncode(variables),
       'features': jsonEncode(features),
+      'fieldToggles': jsonEncode(fieldToggles),
     };
 
     final headers = {
@@ -666,8 +731,11 @@ class TwitterApiService {
           return UserListResultGql(users: users, nextCursor: null);
         }
 
+        final dynamic userResult = data['data']?['user']?['result'];
         final List<dynamic>? instructions =
-            data['data']?['user']?['result']?['timeline']?['timeline']?['instructions']
+            (userResult?['timeline']?['timeline']?['instructions'] ??
+                    userResult?['timeline']?['instructions'] ??
+                    userResult?['timeline_v2']?['timeline']?['instructions'])
                 as List<dynamic>?;
 
         if (instructions == null) {

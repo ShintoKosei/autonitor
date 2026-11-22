@@ -143,6 +143,7 @@ class DataProcessor {
       cffiUrl: _settings.remoteFastApiUrl,
       cffiApiKey: _settings.fastApiApiKey,
       onProgress: _onProgress,
+      waitForRateLimit: _waitForRateLimit,
     );
   }
 
@@ -180,9 +181,16 @@ class DataProcessor {
     );
     _log("Loading GQL Query IDs...");
     try {
-      _ref
+      final refreshed = await _ref
           .read(gqlQueryIdProvider.notifier)
-          .getCurrentQueryIdForDisplay('Following');
+          .refreshApiDataSilently();
+      if (refreshed) {
+        _log("Refreshed latest GQL Query IDs from API document.");
+      } else {
+        _ref
+            .read(gqlQueryIdProvider.notifier)
+            .getCurrentQueryIdForDisplay('Following');
+      }
     } catch (e) {
       _log("Error ensuring GQL Query IDs are loaded: $e");
     }
@@ -205,23 +213,22 @@ class DataProcessor {
 
       _onProgress(
         const SyncProgress(
+          stage: SyncStage.initializingServices,
+          step: SyncStep.initializingTransactionId,
+        ),
+      );
+      await _initDependencies();
+      await _initializeRelationshipAnalyzer();
+      await _checkPauseCallback();
+
+      _onProgress(
+        const SyncProgress(
           stage: SyncStage.refreshingProfile,
           step: SyncStep.refreshingOwnerProfile,
         ),
       );
       final refreshedOwner = await _refreshOwnerProfile();
       await _checkPauseCallback();
-
-      _onProgress(
-        const SyncProgress(
-          stage: SyncStage.initializingServices,
-          step: SyncStep.initializingTransactionId,
-        ),
-      );
-      await _initializeRelationshipAnalyzer();
-      await _checkPauseCallback();
-
-      await _initDependencies();
 
       _onProgress(
         const SyncProgress(

@@ -121,9 +121,14 @@ class NetworkDataFetcher {
     _log("Fetching new following from API (GQL)...");
     String? nextFollowingCursor = "-1";
     var followingPage = 0;
-    final followingQueryId = _ref
-        .read(gqlQueryIdProvider.notifier)
-        .getCurrentQueryIdForDisplay('Following');
+    final gqlNotifier = _ref.read(gqlQueryIdProvider.notifier);
+    final followingQueryId = gqlNotifier.getCurrentQueryIdForDisplay(
+      'Following',
+    );
+    final followingFeatureSwitches = gqlNotifier.getFeatureSwitches(
+      'Following',
+    );
+    final followingFieldToggles = gqlNotifier.getFieldToggles('Following');
     UserListResultGql followingResult;
     do {
       // [Check] 每次分页前检查暂停
@@ -148,6 +153,8 @@ class NetworkDataFetcher {
           transactionId,
           nextFollowingCursor!,
           followingQueryId,
+          extraFeatureSwitches: followingFeatureSwitches,
+          extraFieldToggles: followingFieldToggles,
           apiRequestMode: _apiRequestMode,
           cffiUrl: _cffiUrl,
           cffiApiKey: _cffiApiKey,

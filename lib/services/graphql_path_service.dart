@@ -8,7 +8,7 @@ class GraphQLService {
   static const String _jsonUrl =
       'https://raw.githubusercontent.com/fa0311/TwitterInternalAPIDocument/refs/heads/develop/docs/json/GraphQL.json';
   static const List<String> _targetOperations = [
-    'UserByRestId'
+    'UserByRestId',
     'UsersByRestIds',
     'UserByScreenName',
     'UsersByScreenNames',
@@ -25,7 +25,10 @@ class GraphQLService {
         throw Exception('Failed to fetch GraphQL JSON: ${response.statusCode}');
       }
 
-      final List<dynamic> jsonList = jsonDecode(response.data);
+      final dynamic rawData = response.data;
+      final List<dynamic> jsonList = rawData is String
+          ? jsonDecode(rawData) as List<dynamic>
+          : rawData as List<dynamic>;
       final List<GraphQLOperation> operations = [];
 
       for (var item in jsonList) {
@@ -34,8 +37,26 @@ class GraphQLService {
           final String operationName = exports['operationName'];
           if (_targetOperations.contains(operationName)) {
             final String queryId = exports['queryId'];
+            final metadata = exports['metadata'];
+            final featureSwitches =
+                (metadata is Map && metadata['featureSwitches'] is List)
+                ? (metadata['featureSwitches'] as List)
+                      .map((e) => e.toString())
+                      .toList()
+                : const <String>[];
+            final fieldToggles =
+                (metadata is Map && metadata['fieldToggles'] is List)
+                ? (metadata['fieldToggles'] as List)
+                      .map((e) => e.toString())
+                      .toList()
+                : const <String>[];
             operations.add(
-              GraphQLOperation(queryId: queryId, operationName: operationName),
+              GraphQLOperation(
+                queryId: queryId,
+                operationName: operationName,
+                featureSwitches: featureSwitches,
+                fieldToggles: fieldToggles,
+              ),
             );
           }
         }
