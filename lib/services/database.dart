@@ -322,8 +322,13 @@ class AppDatabase extends _$AppDatabase {
   ///
   /// 旧版本每次同步都会清空 change_reports，导致历史状态（取关/冻结/注销…）
   /// 只剩在看板之外的用户表里。该回填让累计视图在升级后立刻反映真实情况。
+  ///
+  /// `status` 保存在 `latest_raw_json` 里，因此用 `json_extract` 读取。
   Future<void> _backfillStatusReports(String ownerId) async {
     final nowSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final statusList = kCumulativeChangeTypes
+        .map((type) => "'$type'")
+        .join(', ');
     await customStatement(
       '''
 INSERT INTO change_reports (owner_id, user_id, change_type, timestamp, user_snapshot_json)
@@ -335,9 +340,15 @@ SELECT f.owner_id,
        END,
        ?,
        NULL
-FROM follow_users f
-WHERE f.owner_id = ?
-  AND f.status IS NOT NULL
+FROM (
+       SELECT owner_id,
+              user_id,
+              json_extract(latest_raw_json, '\$.status') AS status
+       FROM follow_users
+       WHERE owner_id = ?
+     ) AS f
+WHERE f.status IS NOT NULL
+  AND f.status <> 'normal'
   AND (
         f.status IN ('normal_unfollowed', 'mutual_unfollowed', 'oneway_unfollowed',
                      'temporarily_restricted', 'suspended', 'deactivated', 'recovered')
@@ -347,7 +358,7 @@ WHERE f.owner_id = ?
         SELECT 1 FROM change_reports c
         WHERE c.owner_id = f.owner_id
           AND c.user_id = f.user_id
-          AND c.change_type IN (${kCumulativeChangeTypes.map((t) => "'$t'").join(', ')})
+          AND c.change_type IN ($statusList)
       )
 ''',
       [nowSeconds, ownerId],
