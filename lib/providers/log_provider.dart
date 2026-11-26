@@ -1,11 +1,16 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../services/log_file_service.dart';
+
 // --- 1. The Notifier to hold the log history ---
 class LogHistoryNotifier extends StateNotifier<List<String>> {
-  static const _maxLogLines = 500;
+  /// 界面最多回看的行数。完整日志另存于 [LogFileService]，不受此限制。
+  static const _maxLogLines = 2000;
   LogHistoryNotifier() : super([]);
 
   void addLog(String logEntry) {
+    // 先落盘：即使这条日志随后被环形缓冲挤出，导出时依然完整。
+    LogFileService.instance.add(logEntry);
     Future(() {
       if (!mounted) return;
 

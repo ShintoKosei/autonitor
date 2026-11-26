@@ -184,6 +184,20 @@ class AppLocalizationsZh extends AppLocalizations {
   String get copied_to_clipboard => '已复制到剪贴板了哦！';
 
   @override
+  String get export_log => '导出日志';
+
+  @override
+  String get log_exported => '日志已导出';
+
+  @override
+  String log_export_failed(Object error) {
+    return '导出失败: $error';
+  }
+
+  @override
+  String get log_export_empty => '没有可导出的日志';
+
+  @override
   String get no_json_data_available => '无 JSON 数据';
 
   @override
@@ -1105,6 +1119,20 @@ class AppLocalizationsZhTw extends AppLocalizationsZh {
 
   @override
   String get copied_to_clipboard => '已拷貝到剪貼簿！';
+
+  @override
+  String get export_log => '匯出日誌';
+
+  @override
+  String get log_exported => '日誌已匯出';
+
+  @override
+  String log_export_failed(Object error) {
+    return '匯出失敗: $error';
+  }
+
+  @override
+  String get log_export_empty => '沒有可匯出的日誌';
 
   @override
   String get no_json_data_available => '無 JSON 數據';

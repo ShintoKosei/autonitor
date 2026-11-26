@@ -238,6 +238,27 @@
   "@copied_to_clipboard": {
     "description": "Localized text for the copied_to_clipboard message."
   },
+  "export_log": "Export log",
+  "@export_log": {
+    "description": "Localized text for the export_log button."
+  },
+  "log_exported": "Log exported",
+  "@log_exported": {
+    "description": "Localized text for the log_exported message."
+  },
+  "log_export_failed": "Export failed: {error}",
+  "@log_export_failed": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    },
+    "description": "Localized text for the log_export_failed message."
+  },
+  "log_export_empty": "No logs to export",
+  "@log_export_empty": {
+    "description": "Localized text for the log_export_empty message."
+  },
   "no_json_data_available": "No JSON data available",
   "@no_json_data_available": {
     "description": "Localized text for the no_json_data_available message."

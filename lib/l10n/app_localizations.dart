@@ -441,6 +441,30 @@ abstract class AppLocalizations {
   /// **'Copied to clipboard!'**
   String get copied_to_clipboard;
 
+  /// Localized text for the export_log button.
+  ///
+  /// In en, this message translates to:
+  /// **'Export log'**
+  String get export_log;
+
+  /// Localized text for the log_exported message.
+  ///
+  /// In en, this message translates to:
+  /// **'Log exported'**
+  String get log_exported;
+
+  /// Localized text for the log_export_failed message.
+  ///
+  /// In en, this message translates to:
+  /// **'Export failed: {error}'**
+  String log_export_failed(Object error);
+
+  /// Localized text for the log_export_empty message.
+  ///
+  /// In en, this message translates to:
+  /// **'No logs to export'**
+  String get log_export_empty;
+
   /// Localized text for the no_json_data_available message.
   ///
   /// In en, this message translates to:

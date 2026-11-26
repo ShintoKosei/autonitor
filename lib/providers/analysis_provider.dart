@@ -13,6 +13,7 @@ import '../services/twitter_api_service.dart';
 import '../services/twitter_api_v1_service.dart';
 import '../main.dart';
 import 'auth_provider.dart';
+import 'log_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/image_history_service.dart';
 import '../repositories/account_repository.dart';
@@ -261,6 +262,9 @@ class AnalysisService extends StateNotifier<AnalysisState> {
       // repeatedly copy an unbounded list and stall the visual progress UI.
       final log = [...state.log, message];
       state = state.copyWith(log: log.length > 500 ? log.sublist(1) : log);
+      // 同步过程日志不是 logger 输出的，单独并入统一日志流，
+      // 这样"查看日志"和"导出日志"都能拿到完整的同步记录。
+      globalLogHistoryNotifier.addLog('[sync] $message');
     }
 
     void progressCallback(SyncProgress progress) {

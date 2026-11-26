@@ -185,6 +185,20 @@ class AppLocalizationsEn extends AppLocalizations {
   String get copied_to_clipboard => 'Copied to clipboard!';
 
   @override
+  String get export_log => 'Export log';
+
+  @override
+  String get log_exported => 'Log exported';
+
+  @override
+  String log_export_failed(Object error) {
+    return 'Export failed: $error';
+  }
+
+  @override
+  String get log_export_empty => 'No logs to export';
+
+  @override
   String get no_json_data_available => 'No JSON data available';
 
   @override

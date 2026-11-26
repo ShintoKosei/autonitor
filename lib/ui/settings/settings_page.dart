@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:autonitor/models/app_settings.dart';
@@ -14,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../services/x_client_transaction_service.dart';
 import '../../services/backup_restore_service.dart';
+import '../../services/log_file_service.dart';
 import '../../services/log_service.dart';
 import '../../main.dart';
 import '../../providers/graphql_queryid_provider.dart';
