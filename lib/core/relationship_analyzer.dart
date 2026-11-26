@@ -10,6 +10,16 @@ import '../repositories/account_repository.dart';
 import '../models/sync_progress.dart';
 
 const String kChangeTypeProfileUpdate = 'profile_update';
+
+/// Returned by the status resolver when the lookup itself failed (network,
+/// HTTP error, unexpected payload). It is deliberately distinct from any real
+/// relationship verdict so callers can fall back to flag-based classification
+/// instead of inventing a category.
+const String kStatusLookupFailed = 'lookup_failed';
+
+/// The account still exists and is reachable.
+const String kStatusNormal = 'normal';
+
 typedef LogCallback = void Function(String message);
 
 String? classifyKeptRelationshipChange({
@@ -65,6 +75,34 @@ String? classifyKeptRelationshipChange({
   }
 
   return null;
+}
+
+/// Maps the resolved account state plus the previously stored flags onto a
+/// removal report category.
+///
+/// The relationship direction (普通取关 / 互关双取) is fully derivable from the
+/// old flags, so it is decided here instead of depending on a network lookup.
+/// Only `suspended`, `deactivated` and `temporarily_restricted` require a
+/// positive answer from the API.
+String classifyRemovedRelationshipChange({
+  required String? apiStatus,
+  required bool wasFollower,
+  required bool wasFollowing,
+}) {
+  if (apiStatus == 'suspended' ||
+      apiStatus == 'deactivated' ||
+      apiStatus == 'temporarily_restricted') {
+    return apiStatus!;
+  }
+
+  if (wasFollower && wasFollowing) return 'mutual_unfollowed';
+  if (wasFollower) return 'normal_unfollowed';
+  if (wasFollowing) return 'normal_unfollowed';
+  if (apiStatus == kStatusNormal) return 'normal_unfollowed';
+
+  // No historical relationship and no verdict: report it as unknown rather
+  // than inventing an unfollow.
+  return 'other_reasons';
 }
 
 class RelationshipAnalysisResult {
@@ -208,109 +246,136 @@ class RelationshipAnalyzer {
     }
   }
 
-  String _classifyGqlUserResult(dynamic result) {
+  /// Classifies a single `user_results.result` node.
+  ///
+  /// Returns one of [kStatusNormal], `suspended`, `deactivated`,
+  /// `temporarily_restricted` or [kStatusLookupFailed].
+  ///
+  /// The important contract is that a *failed lookup* must never be reported as
+  /// a relationship verdict. Older versions returned `other_reasons` for any
+  /// unexpected payload, which silently turned every unfollow into "other
+  /// reasons" as soon as X changed the shape of this response.
+  String _classifyGqlUserResult(
+    dynamic result, {
+    bool missingMeansUnavailable = false,
+  }) {
     if (result == null || (result is Map && result.isEmpty)) {
-      return 'deactivated';
+      // An aligned response without a node for the requested id is positive
+      // evidence that the account is no longer retrievable.
+      return missingMeansUnavailable ? 'deactivated' : kStatusLookupFailed;
     }
     if (result is! Map) {
-      return 'other_reasons';
+      return kStatusLookupFailed;
     }
-    final String? typename = result['__typename'] as String?;
-    final String? message = result['message'] as String?;
-    final String? reason = result['reason'] as String?;
 
-    if (typename == 'User') {
+    final String? typename = result['__typename']?.toString();
+    final String lowerMsg = (result['message']?.toString() ?? '').toLowerCase();
+    final String lowerReason = (result['reason']?.toString() ?? '')
+        .toLowerCase();
+
+    // `__typename` is not guaranteed: some operations stopped requesting it.
+    // Fall back to the presence of user fields instead of discarding the node.
+    final bool looksLikeUser =
+        result['rest_id'] != null ||
+        result['legacy'] is Map ||
+        result['core'] is Map;
+
+    if (typename == 'User' || (typename == null && looksLikeUser)) {
       final legacy = result['legacy'];
       final interstitial = legacy is Map
-          ? legacy['profile_interstitial_type'] as String?
+          ? legacy['profile_interstitial_type']?.toString()
           : null;
       return (interstitial != null && interstitial.isNotEmpty)
           ? 'temporarily_restricted'
-          : 'normal_unfollowed';
-    } else if (typename == 'UserUnavailable') {
-      final lowerMsg = message?.toLowerCase() ?? '';
-      final lowerReason = reason?.toLowerCase() ?? '';
-      if (lowerMsg.contains('suspended') || lowerReason.contains('suspended')) {
-        return 'suspended';
-      } else if (lowerMsg.contains('deactivated') ||
-          lowerReason.contains('deactivated') ||
-          lowerReason.contains('offboarded')) {
-        return 'deactivated';
-      } else {
-        return 'suspended'; // 默认回退逻辑
-      }
+          : kStatusNormal;
     }
-    return 'other_reasons';
+
+    if (typename == 'UserUnavailable') {
+      if (lowerMsg.contains('suspend') || lowerReason.contains('suspend')) {
+        return 'suspended';
+      }
+      if (lowerMsg.contains('deactivat') ||
+          lowerReason.contains('deactivat') ||
+          lowerReason.contains('offboard')) {
+        return 'deactivated';
+      }
+      return 'suspended'; // 默认回退逻辑
+    }
+
+    return kStatusLookupFailed;
   }
 
-  Future<Map<String, String>> _categorizeRemovals(Set<String> ids) async {
+  String _describeError(Object error) {
+    final text = error.toString();
+    return text.length > 400 ? '${text.substring(0, 400)}…' : text;
+  }
+
+  /// Resolves the current state of [ids] (users that disappeared from the
+  /// fetched follower/following sets).
+  ///
+  /// Strategy, in order:
+  ///  1. `UsersByRestIds` (batch). Ids are unambiguous, so this is preferred.
+  ///  2. `UsersByScreenNames` (batch, using the stored screen name). This is the
+  ///     same operation the profile-enrichment stage uses every sync, so it
+  ///     keeps working when the ByRestId family is rejected by the API.
+  ///
+  /// Anything still unresolved is reported as [kStatusLookupFailed]; callers
+  /// must treat that as "unknown" and never as a relationship verdict.
+  Future<Map<String, String>> _categorizeRemovals(
+    Set<String> ids, {
+    Map<String, FollowUser>? oldRelationsMap,
+  }) async {
     final Map<String, String> results = {};
     if (ids.isEmpty) return results;
 
-    if (ids.length == 1) {
-      final String removedId = ids.first;
-      _log("Fetching status for single user $removedId...");
-      await _checkPauseCallback();
-      try {
-        final queryId = _accountRepository.getCurrentQueryId('UserByRestId');
-        final featureSwitches = _accountRepository.getFeatureSwitches(
-          'UserByRestId',
-        );
-        final fieldToggles = _accountRepository.getFieldToggles('UserByRestId');
-        final transactionId = _xctService?.generateTransactionId(
-          method: "GET",
-          url: 'https://api.x.com/graphql/$queryId/UserByRestId',
-        );
-        final Map<String, dynamic> gqlJson = await _retryAfterRateLimit(
-          () => _apiServiceGql.getUserByRestId(
-            removedId,
-            _ownerCookie,
-            queryId,
-            transactionId: transactionId,
-            extraFeatureSwitches: featureSwitches,
-            extraFieldToggles: fieldToggles,
-            apiRequestMode: _apiRequestMode,
-            cffiUrl: _cffiUrl,
-            cffiApiKey: _cffiApiKey,
-          ),
-        );
-        final dynamic userNode = gqlJson['data']?['user'];
-        if (userNode == null || (userNode is Map && userNode.isEmpty)) {
-          results[removedId] = 'deactivated';
-        } else {
-          results[removedId] = _classifyGqlUserResult(userNode['result']);
-        }
-      } catch (e) {
-        _log("Error fetching single user $removedId: $e");
-        results[removedId] = 'other_reasons';
-      }
-      return results;
+    final Set<String> unresolved = {...ids};
+
+    await _lookupStatusesByRestIds(unresolved, results);
+    unresolved.removeWhere(results.containsKey);
+
+    if (unresolved.isNotEmpty) {
+      await _lookupStatusesByScreenNames(unresolved, results, oldRelationsMap);
+      unresolved.removeWhere(results.containsKey);
     }
 
-    _log("Batch fetching status for ${ids.length} users...");
-    final queryId = _accountRepository.getCurrentQueryId('UsersByRestIds');
+    if (unresolved.isNotEmpty) {
+      _log(
+        'Status lookup failed for ${unresolved.length} of ${ids.length} users; '
+        'falling back to relationship flags for those users.',
+      );
+      for (final id in unresolved) {
+        results[id] = kStatusLookupFailed;
+      }
+    }
+    return results;
+  }
+
+  Future<void> _lookupStatusesByRestIds(
+    Set<String> ids,
+    Map<String, String> results,
+  ) async {
+    final String queryId = _accountRepository.getCurrentQueryId(
+      'UsersByRestIds',
+    );
     final featureSwitches = _accountRepository.getFeatureSwitches(
       'UsersByRestIds',
     );
     final fieldToggles = _accountRepository.getFieldToggles('UsersByRestIds');
-    final List<String> allIdList = ids.toList();
+    final List<String> idList = ids.toList();
     const int batchSize = 100;
 
-    for (int start = 0; start < allIdList.length; start += batchSize) {
+    for (int start = 0; start < idList.length; start += batchSize) {
       await _checkPauseCallback();
-      final int end = min(start + batchSize, allIdList.length);
-      final List<String> idList = allIdList.sublist(start, end);
+      final int end = min(start + batchSize, idList.length);
+      final List<String> chunk = idList.sublist(start, end);
       try {
         final transactionId = _xctService?.generateTransactionId(
           method: "GET",
           url: 'https://api.x.com/graphql/$queryId/UsersByRestIds',
         );
-        if (transactionId == null) {
-          _log('Transaction ID unavailable; using UsersByRestIds without it.');
-        }
         final Map<String, dynamic> gqlJson = await _retryAfterRateLimit(
           () => _apiServiceGql.getUsersByRestIds(
-            idList,
+            chunk,
             _ownerCookie,
             queryId,
             transactionId,
@@ -321,52 +386,151 @@ class RelationshipAnalyzer {
             cffiApiKey: _cffiApiKey,
           ),
         );
-        final List<dynamic>? usersData = gqlJson['data']?['users'];
-        if (usersData == null) {
-          _log("UsersByRestIds returned null 'data.users' for batch $start..${end - 1}.");
-          for (final id in idList) {
-            results[id] = 'other_reasons';
-          }
+
+        final dynamic usersData = gqlJson['data']?['users'];
+        if (usersData is! List) {
+          _log(
+            'UsersByRestIds returned no data.users for ${chunk.length} ids '
+            '(top-level keys: ${gqlJson.keys.join(", ")}). '
+            'Retrying these users by screen name.',
+          );
           continue;
         }
 
-        final Map<String, dynamic> resultsByRestId = {};
+        // Positional alignment is only meaningful when the server returned one
+        // node per requested id.
+        final bool aligned = usersData.length == chunk.length;
+        final Map<String, dynamic> byRestId = {};
         for (final entry in usersData) {
           final dynamic result = entry is Map ? entry['result'] : null;
           if (result is Map) {
             final restId = result['rest_id']?.toString();
-            if (restId != null && restId.isNotEmpty) {
-              resultsByRestId[restId] = result;
-            }
+            if (restId != null && restId.isNotEmpty) byRestId[restId] = result;
           }
         }
 
-        for (int i = 0; i < idList.length; i++) {
-          final String currentId = idList[i];
-          dynamic result = resultsByRestId[currentId];
-          if (result == null && i < usersData.length) {
+        for (int i = 0; i < chunk.length; i++) {
+          final String currentId = chunk[i];
+          dynamic result = byRestId[currentId];
+          if (result == null && aligned) {
             final entry = usersData[i];
-            final positionalResult = entry is Map ? entry['result'] : null;
-            final positionalRestId = positionalResult is Map
-                ? positionalResult['rest_id']?.toString()
-                : null;
-            if (positionalRestId == null ||
-                positionalRestId.isEmpty ||
-                positionalRestId == currentId) {
-              result = positionalResult;
-            }
+            result = entry is Map ? entry['result'] : null;
           }
-          results[currentId] = _classifyGqlUserResult(result);
+          final status = _classifyGqlUserResult(
+            result,
+            missingMeansUnavailable: aligned,
+          );
+          if (status != kStatusLookupFailed) results[currentId] = status;
         }
       } catch (e) {
-        _log("Batch fetch error ($start..${end - 1}): $e");
-        for (final id in idList) {
-          results[id] = 'other_reasons';
-        }
+        _log(
+          'UsersByRestIds failed for batch $start..${end - 1}: '
+          '${_describeError(e)}',
+        );
       }
     }
-    return results;
   }
+
+  Future<void> _lookupStatusesByScreenNames(
+    Set<String> ids,
+    Map<String, String> results,
+    Map<String, FollowUser>? oldRelationsMap,
+  ) async {
+    final Map<String, String> idByName = {};
+    for (final id in ids) {
+      final String? name = oldRelationsMap?[id]?.screenName
+          ?.trim()
+          .toLowerCase();
+      if (name != null && name.isNotEmpty) idByName.putIfAbsent(name, () => id);
+    }
+    if (idByName.isEmpty) return;
+
+    final String queryId = _accountRepository.getCurrentQueryId(
+      'UsersByScreenNames',
+    );
+    final featureSwitches = _accountRepository.getFeatureSwitches(
+      'UsersByScreenNames',
+    );
+    final fieldToggles = _accountRepository.getFieldToggles(
+      'UsersByScreenNames',
+    );
+    final List<String> names = idByName.keys.toList();
+    const int batchSize = 100;
+
+    for (int start = 0; start < names.length; start += batchSize) {
+      await _checkPauseCallback();
+      final int end = min(start + batchSize, names.length);
+      final List<String> chunk = names.sublist(start, end);
+      try {
+        final transactionId = _xctService?.generateTransactionId(
+          method: "GET",
+          url: 'https://api.x.com/graphql/$queryId/UsersByScreenNames',
+        );
+        final Map<String, dynamic> gqlJson = await _retryAfterRateLimit(
+          () => _apiServiceGql.getUsersByScreenNames(
+            chunk,
+            _ownerCookie,
+            queryId,
+            transactionId,
+            extraFeatureSwitches: featureSwitches,
+            extraFieldToggles: fieldToggles,
+            apiRequestMode: _apiRequestMode,
+            cffiUrl: _cffiUrl,
+            cffiApiKey: _cffiApiKey,
+          ),
+        );
+
+        final dynamic usersData = gqlJson['data']?['users'];
+        if (usersData is! List) {
+          _log(
+            'UsersByScreenNames returned no data.users for ${chunk.length} '
+            'names; leaving them unresolved.',
+          );
+          continue;
+        }
+
+        final bool aligned = usersData.length == chunk.length;
+        for (int i = 0; i < usersData.length; i++) {
+          final entry = usersData[i];
+          final dynamic result = entry is Map ? entry['result'] : null;
+          String? id;
+          String? name;
+          if (result is Map) {
+            final restId = result['rest_id']?.toString();
+            if (restId != null && restId.isNotEmpty && ids.contains(restId)) {
+              id = restId;
+            }
+            final legacy = result['legacy'];
+            final core = result['core'];
+            name =
+                (legacy is Map ? legacy['screen_name']?.toString() : null) ??
+                (core is Map ? core['screen_name']?.toString() : null);
+          }
+          id ??= idByName[name?.trim().toLowerCase()];
+          if (id == null && aligned) {
+            id = idByName[chunk[i]];
+          }
+          if (id == null) continue;
+          final status = _classifyGqlUserResult(result);
+          if (status != kStatusLookupFailed) results[id] = status;
+        }
+      } catch (e) {
+        _log(
+          'UsersByScreenNames failed for batch $start..${end - 1}: '
+          '${_describeError(e)}',
+        );
+      }
+    }
+  }
+
+  String _resolveRemovalCategory(
+    String? apiStatus,
+    FollowUser? oldRelation,
+  ) => classifyRemovedRelationshipChange(
+    apiStatus: apiStatus,
+    wasFollower: oldRelation?.isFollower ?? false,
+    wasFollowing: oldRelation?.isFollowing ?? false,
+  );
 
   Future<RelationshipAnalysisResult> _processRemovalsAndGenerateReports(
     Map<String, FollowUser> oldRelationsMap,
@@ -379,10 +543,14 @@ class RelationshipAnalyzer {
     final List<ChangeReportsCompanion> reportCompanions = [];
     final now = DateTime.now();
 
-    final categorizedRemovals = await _categorizeRemovals(removedIds);
-    for (final id in removedIds) {
-      categorizedRemovals.putIfAbsent(id, () => 'other_reasons');
-    }
+    final removalStatuses = await _categorizeRemovals(
+      removedIds,
+      oldRelationsMap: oldRelationsMap,
+    );
+    final Map<String, String> categorizedRemovals = {
+      for (final id in removedIds)
+        id: _resolveRemovalCategory(removalStatuses[id], oldRelationsMap[id]),
+    };
 
     final Set<String> potentialRestrictedIds = {};
     var loopCounter = 0;
@@ -476,17 +644,10 @@ class RelationshipAnalyzer {
       }
     }
 
-    final restrictedChecks = await _categorizeRemovals(potentialRestrictedIds);
-
-    categorizedRemovals.forEach((userId, category) {
-      if (category == 'normal_unfollowed') {
-        final rel = oldRelationsMap[userId];
-        categorizedRemovals[userId] =
-            (rel?.isFollower == true && rel?.isFollowing == true)
-            ? 'mutual_unfollowed'
-            : 'normal_unfollowed';
-      }
-    });
+    final restrictedChecks = await _categorizeRemovals(
+      potentialRestrictedIds,
+      oldRelationsMap: oldRelationsMap,
+    );
 
     for (final id in addedIds) {
       reportCompanions.add(
@@ -535,7 +696,11 @@ class RelationshipAnalyzer {
           throw FormatException('Invalid stored JSON for user $keptId: $e');
         }
       }
-      final String currentStatus = restrictedChecks[keptId] ?? 'normal';
+      // A kept user is present in the freshly fetched lists, so "normal" is the
+      // correct default. Users that were explicitly re-checked keep the verdict
+      // of that lookup; an inconclusive lookup stays unknown and therefore can
+      // never be reported as a recovery.
+      final String currentStatus = restrictedChecks[keptId] ?? kStatusNormal;
       final changeType = classifyKeptRelationshipChange(
         wasFollower: wasFollower,
         wasFollowing: wasFollowing,

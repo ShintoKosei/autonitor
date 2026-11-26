@@ -20,6 +20,32 @@ class GraphQlRateLimitException implements Exception {
       : 'GraphQL rate limit reached for $endpoint until $resetAt';
 }
 
+/// Raised for a non-200 GraphQL response.
+///
+/// The HTTP status and the raw body are kept so callers can log *what X
+/// actually answered*. Collapsing this into a generic `Exception` made a hard
+/// API regression indistinguishable from a per-user data problem.
+class GraphQlHttpException implements Exception {
+  GraphQlHttpException({
+    required this.endpoint,
+    required this.statusCode,
+    this.body,
+  });
+
+  final String endpoint;
+  final int? statusCode;
+  final Object? body;
+
+  String get bodySnippet {
+    final text = body?.toString() ?? '';
+    return text.length > 400 ? '${text.substring(0, 400)}…' : text;
+  }
+
+  @override
+  String toString() =>
+      'GraphQL HTTP $statusCode on $endpoint${body == null ? '' : ': $bodySnippet'}';
+}
+
 class UserListResultGql {
   final List<Map<String, dynamic>> users;
   final String? nextCursor;
@@ -260,11 +286,15 @@ class TwitterApiService {
         logger.d("Response data: ${response.data}");
         return response.data as Map<String, dynamic>;
       } else {
-        throw Exception(
-          'Failed to fetch user information: Status ${response.statusCode}',
+        throw GraphQlHttpException(
+          endpoint: url,
+          statusCode: response.statusCode,
+          body: response.data,
         );
       }
     } on GraphQlRateLimitException {
+      rethrow;
+    } on GraphQlHttpException {
       rethrow;
     } on DioException catch (e, s) {
       logger.e(
@@ -275,7 +305,7 @@ class TwitterApiService {
       throw Exception('Network request failed: ${e.message}');
     } catch (e, s) {
       logger.e("Unknown error on getUserByRestId", error: e, stackTrace: s);
-      throw Exception('An unknown error occurred.');
+      throw Exception('getUserByRestId failed: $e');
     }
   }
 
@@ -362,11 +392,15 @@ class TwitterApiService {
         logger.d("Response data: ${response.data}");
         return response.data as Map<String, dynamic>;
       } else {
-        throw Exception(
-          'Failed to fetch user information: Status ${response.statusCode}',
+        throw GraphQlHttpException(
+          endpoint: url,
+          statusCode: response.statusCode,
+          body: response.data,
         );
       }
     } on GraphQlRateLimitException {
+      rethrow;
+    } on GraphQlHttpException {
       rethrow;
     } on DioException catch (e, s) {
       logger.e(
@@ -377,7 +411,7 @@ class TwitterApiService {
       throw Exception('Network request failed: ${e.message}');
     } catch (e, s) {
       logger.e("Unknown error on getUsersByRestIds", error: e, stackTrace: s);
-      throw Exception('An unknown error occurred.');
+      throw Exception('getUsersByRestIds failed: $e');
     }
   }
 
@@ -464,9 +498,10 @@ class TwitterApiService {
         logger.d("Response data: ${response.data}");
         return response.data as Map<String, dynamic>;
       } else {
-        throw Exception(
-          'UsersByScreenNames request failed: status ${response.statusCode}; '
-          'response: ${response.data}',
+        throw GraphQlHttpException(
+          endpoint: url,
+          statusCode: response.statusCode,
+          body: response.data,
         );
       }
     } on GraphQlRateLimitException {

@@ -8,6 +8,28 @@ import 'package:path/path.dart' as p;
 
 part 'database.g.dart';
 
+/// 关系状态类报告：描述某个用户当前处于什么关系状态，跨同步累计保留。
+///
+/// 每个用户在同一时刻只会命中其中一条，写入时按 (owner_id, user_id) 覆盖，
+/// 因此看板上的数字等于"当前处于该状态的用户数"。
+const Set<String> kCumulativeChangeTypes = {
+  'normal_unfollowed',
+  'mutual_unfollowed',
+  'oneway_unfollowed',
+  'temporarily_restricted',
+  'suspended',
+  'deactivated',
+  'recovered',
+  'other_reasons',
+};
+
+/// 事件类报告：描述"本次同步发生了什么"，每次同步整体替换。
+const Set<String> kTransientChangeTypes = {
+  'profile_update',
+  'new_followers_following',
+  'be_followed_back',
+};
+
 //数据库表定义
 @DataClassName('LoggedAccount')
 class LoggedAccounts extends Table {
@@ -252,15 +274,84 @@ class AppDatabase extends _$AppDatabase {
     String ownerId,
     List<ChangeReportsCompanion> reportCompanions,
   ) async {
-    await transaction(() async {
-      await (delete(
-        changeReports,
-      )..where((tbl) => tbl.ownerId.equals(ownerId))).go();
+    // 状态类：描述某个关系用户当前处于什么状态，跨同步累计保留。
+    // 事件类：描述"本次同步发生了什么"，每次同步整体替换。
+    final cumulative = reportCompanions
+        .where((c) => kCumulativeChangeTypes.contains(c.changeType.value))
+        .toList();
+    final transient = reportCompanions
+        .where((c) => !kCumulativeChangeTypes.contains(c.changeType.value))
+        .toList();
+    final touchedUserIds = cumulative
+        .map((c) => c.userId.value)
+        .toSet()
+        .toList();
 
-      await batch((batch) {
-        batch.insertAll(changeReports, reportCompanions);
-      });
+    await transaction(() async {
+      // 1) 事件类整体替换。
+      await (delete(changeReports)..where(
+            (tbl) =>
+                tbl.ownerId.equals(ownerId) &
+                tbl.changeType.isIn(kTransientChangeTypes.toList()),
+          ))
+          .go();
+
+      // 2) 状态类只替换本次涉及的这些用户，其他用户的历史状态保留。
+      if (touchedUserIds.isNotEmpty) {
+        await (delete(changeReports)..where(
+              (tbl) =>
+                  tbl.ownerId.equals(ownerId) &
+                  tbl.changeType.isIn(kCumulativeChangeTypes.toList()) &
+                  tbl.userId.isIn(touchedUserIds),
+            ))
+            .go();
+      }
+
+      if (transient.isNotEmpty || cumulative.isNotEmpty) {
+        await batch((batch) {
+          batch.insertAll(changeReports, [...transient, ...cumulative]);
+        });
+      }
+
+      // 3) 回填：升级前只写进 follow_users.status、没进过报告表的历史状态。
+      await _backfillStatusReports(ownerId);
     });
+  }
+
+  /// 把 `follow_users.status` 中已有的关系状态补成报告行，每个用户最多一条。
+  ///
+  /// 旧版本每次同步都会清空 change_reports，导致历史状态（取关/冻结/注销…）
+  /// 只剩在看板之外的用户表里。该回填让累计视图在升级后立刻反映真实情况。
+  Future<void> _backfillStatusReports(String ownerId) async {
+    final nowSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    await customStatement(
+      '''
+INSERT INTO change_reports (owner_id, user_id, change_type, timestamp, user_snapshot_json)
+SELECT f.owner_id,
+       f.user_id,
+       CASE
+         WHEN f.status IN ('unknown_error', 'unknown_gql_response') THEN 'other_reasons'
+         ELSE f.status
+       END,
+       ?,
+       NULL
+FROM follow_users f
+WHERE f.owner_id = ?
+  AND f.status IS NOT NULL
+  AND (
+        f.status IN ('normal_unfollowed', 'mutual_unfollowed', 'oneway_unfollowed',
+                     'temporarily_restricted', 'suspended', 'deactivated', 'recovered')
+     OR f.status IN ('unknown_error', 'unknown_gql_response', 'other_reasons')
+      )
+  AND NOT EXISTS (
+        SELECT 1 FROM change_reports c
+        WHERE c.owner_id = f.owner_id
+          AND c.user_id = f.user_id
+          AND c.change_type IN (${kCumulativeChangeTypes.map((t) => "'$t'").join(', ')})
+      )
+''',
+      [nowSeconds, ownerId],
+    );
   }
 
   Future<int> insertMediaHistory(MediaHistoryCompanion companion) {

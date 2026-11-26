@@ -69,4 +69,85 @@ void main() {
       isNull,
     );
   });
+
+  group('classifyRemovedRelationshipChange', () {
+    test('reports a mutual relationship as mutual_unfollowed', () {
+      expect(
+        classifyRemovedRelationshipChange(
+          apiStatus: 'normal',
+          wasFollower: true,
+          wasFollowing: true,
+        ),
+        'mutual_unfollowed',
+      );
+    });
+
+    test('reports a follower-only relationship as normal_unfollowed', () {
+      expect(
+        classifyRemovedRelationshipChange(
+          apiStatus: 'normal',
+          wasFollower: true,
+          wasFollowing: false,
+        ),
+        'normal_unfollowed',
+      );
+    });
+
+    test('keeps the relationship verdict when the status lookup failed', () {
+      expect(
+        classifyRemovedRelationshipChange(
+          apiStatus: 'lookup_failed',
+          wasFollower: true,
+          wasFollowing: true,
+        ),
+        'mutual_unfollowed',
+      );
+      expect(
+        classifyRemovedRelationshipChange(
+          apiStatus: null,
+          wasFollower: true,
+          wasFollowing: false,
+        ),
+        'normal_unfollowed',
+      );
+    });
+
+    test('reports API verdicts even when the user was mutual', () {
+      expect(
+        classifyRemovedRelationshipChange(
+          apiStatus: 'suspended',
+          wasFollower: true,
+          wasFollowing: true,
+        ),
+        'suspended',
+      );
+      expect(
+        classifyRemovedRelationshipChange(
+          apiStatus: 'deactivated',
+          wasFollower: true,
+          wasFollowing: false,
+        ),
+        'deactivated',
+      );
+      expect(
+        classifyRemovedRelationshipChange(
+          apiStatus: 'temporarily_restricted',
+          wasFollower: false,
+          wasFollowing: true,
+        ),
+        'temporarily_restricted',
+      );
+    });
+
+    test('never invents a relationship when nothing is known', () {
+      expect(
+        classifyRemovedRelationshipChange(
+          apiStatus: 'lookup_failed',
+          wasFollower: false,
+          wasFollowing: false,
+        ),
+        'other_reasons',
+      );
+    });
+  });
 }
