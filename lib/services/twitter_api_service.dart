@@ -5,6 +5,18 @@ import 'log_service.dart';
 
 final twitterApiServiceProvider = Provider((ref) => TwitterApiService());
 
+/// Truncates a GraphQL payload before it reaches the log.
+///
+/// A single 50-user `Following` page stringifies to ~10 KB, so logging every
+/// response verbatim turned a 2-run session into 4 337 lines and buried the
+/// real errors. 600 chars keep the shape of the payload without the noise.
+String _previewResponse(Object? data, {int maxChars = 600}) {
+  final text = data?.toString() ?? '';
+  if (text.length <= maxChars) return text;
+  return '${text.substring(0, maxChars)}… '
+      '[truncated, ${text.length} chars total]';
+}
+
 /// Preserves the reset time returned by X instead of losing it in a generic
 /// networking exception. The value is the Unix timestamp from
 /// `x-rate-limit-reset`.
@@ -283,7 +295,7 @@ class TwitterApiService {
       );
 
       if (response.statusCode == 200 && response.data != null) {
-        logger.d("Response data: ${response.data}");
+        logger.d("Response data: ${_previewResponse(response.data)}");
         return response.data as Map<String, dynamic>;
       } else {
         throw GraphQlHttpException(
@@ -389,7 +401,7 @@ class TwitterApiService {
       );
 
       if (response.statusCode == 200 && response.data != null) {
-        logger.d("Response data: ${response.data}");
+        logger.d("Response data: ${_previewResponse(response.data)}");
         return response.data as Map<String, dynamic>;
       } else {
         throw GraphQlHttpException(
@@ -495,7 +507,7 @@ class TwitterApiService {
       );
 
       if (response.statusCode == 200 && response.data != null) {
-        logger.d("Response data: ${response.data}");
+        logger.d("Response data: ${_previewResponse(response.data)}");
         return response.data as Map<String, dynamic>;
       } else {
         throw GraphQlHttpException(
@@ -659,7 +671,7 @@ class TwitterApiService {
       );
 
       if (response.statusCode == 200 && response.data != null) {
-        logger.d("Response data: ${response.data}");
+        logger.d("Response data: ${_previewResponse(response.data)}");
         return response.data as Map<String, dynamic>;
       } else {
         throw Exception(
@@ -750,7 +762,7 @@ class TwitterApiService {
       );
 
       if (response.statusCode == 200 && response.data != null) {
-        logger.d("Response data: ${response.data}");
+        logger.d("Response data: ${_previewResponse(response.data)}");
         final Map<String, dynamic> data = response.data;
 
         // X may return a direct list instead of the historical timeline

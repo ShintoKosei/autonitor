@@ -130,6 +130,9 @@ class NetworkDataFetcher {
     );
     final followingFieldToggles = gqlNotifier.getFieldToggles('Following');
     UserListResultGql followingResult;
+    // 分页有 40+ 页，每页都打一遍“Transaction ID unavailable”会把日志刷爆。
+    // 这个状态在一次抓取内不会变化，只报一次即可。
+    var transactionIdLogged = false;
     do {
       // [Check] 每次分页前检查暂停
       await _checkPauseCallback();
@@ -140,11 +143,14 @@ class NetworkDataFetcher {
             method: "GET",
             url: "https://api.x.com/graphql/$followingQueryId/Following",
           );
-      _log(
-        transactionId == null
-            ? 'Transaction ID unavailable for Following; sending request without it.'
-            : 'Generated Transaction ID for Following: $transactionId',
-      );
+      if (!transactionIdLogged) {
+        transactionIdLogged = true;
+        _log(
+          transactionId == null
+              ? 'Transaction ID unavailable for Following; sending request without it.'
+              : 'Generated Transaction ID for Following: $transactionId',
+        );
+      }
 
       followingResult = await _retryAfterRateLimit(
         () => _apiServiceGql.getFollowing(

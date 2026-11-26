@@ -165,12 +165,18 @@ class DataProcessor {
   }
 
   Future<void> _initDependencies() async {
-    _log("Initalizing XClientTransactionID generator...");
+    _log("Initializing XClientTransactionID generator...");
     try {
-      await _ref.read(transactionIdProvider.notifier).init();
+      final notifier = _ref.read(transactionIdProvider.notifier);
+      // 带上账号 Cookie，X 才会返回登录态的应用外壳，
+      // 而不是把 /home 307 重定向到未登录的落地页。
+      notifier.updateCookie(_ownerCookie);
+      await notifier.init();
     } catch (e) {
+      // 该头目前是可选的：缺失时 GQL 请求依然成功，所以这只是降级提示，
+      // 不是致命错误。旧日志写成 CRITICAL ERROR 会误导排障方向。
       _log(
-        "!!! CRITICAL ERROR: Failed to initialize XClientTransactionID generator: $e",
+        "WARNING: X-Client-Transaction-Id unavailable; continuing without it. Reason: $e",
       );
     }
     _onProgress(

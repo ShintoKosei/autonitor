@@ -103,7 +103,7 @@ class ImageHistoryService {
       } catch (_) {}
       return false;
     } catch (e, s) {
-      logger.e("Unknown error downloading $url", error: e, stackTrace: s);
+      logger.e("Image download failed for $url: $e", error: e, stackTrace: s);
       try {
         final file = File(savePath);
         if (await file.exists()) {
@@ -328,22 +328,37 @@ class ImageHistoryService {
 /// Top-level so it can run in a background isolate. It intentionally has no
 /// database or Flutter dependencies; the caller persists successful downloads
 /// on the main isolate afterwards.
+///
+/// Errors are deliberately not swallowed here: the caller logs them.  The old
+/// `catch (_) { return false; }` made every failed download invisible — the log
+/// said "Found 3 new media items to download" and then "downloaded 0 images"
+/// with no reason at all.
 Future<bool> _downloadImageInBackground(String url, String savePath) async {
   final dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 30),
+      headers: const {
+        // pbs.twimg.com 对缺少浏览器 UA / Referer 的请求会直接返回 403。
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+        'Referer': 'https://x.com/',
+        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+      },
     ),
   );
   try {
-    await dio.download(url, savePath, options: Options());
+    await dio.download(url, savePath);
     return true;
-  } catch (_) {
+  } catch (error) {
     final file = File(savePath);
     if (await file.exists()) {
       await file.delete();
     }
-    return false;
+    // 只把可跨 isolate 传递的 StateError 抛回去：DioException 里带着
+    // RequestOptions/Stream，跨 SendPort 传递可能直接序列化失败。
+    throw StateError('download failed: $error');
   } finally {
     dio.close(force: true);
   }

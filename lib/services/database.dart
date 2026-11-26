@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:autonitor/services/migrations/introduce_runid.dart';
+import 'package:autonitor/services/migrations/purge_backfilled_unknown_reports.dart';
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:path_provider/path_provider.dart';
@@ -163,7 +164,7 @@ class AppDatabase extends _$AppDatabase {
   // 数据库迁移
   @override
   // [Upgraded] Upgrade to version 3 to include indices
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -190,6 +191,10 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 5) {
         await MigrateToV5.execute(this);
+      }
+      if (from < 6) {
+        // 清掉旧版本把 `unknown_error` 当成结论回填出来的「其它原因」行。
+        await PurgeBackfilledUnknownReports.execute(this);
       }
     },
   );
@@ -323,6 +328,11 @@ class AppDatabase extends _$AppDatabase {
   /// 旧版本每次同步都会清空 change_reports，导致历史状态（取关/冻结/注销…）
   /// 只剩在看板之外的用户表里。该回填让累计视图在升级后立刻反映真实情况。
   ///
+  /// 注意：`unknown_error` / `unknown_gql_response` **不在回填范围内**。
+  /// 它们表示"查询失败、状态未知"，不是一种关系结论；早期版本把它们映射成
+  /// `other_reasons`，结果看板上的「其它原因」被历史遗留行灌到几百条
+  /// （一份实测数据库里 362 条 unknown 状态被回填成 291 条报告）。
+  ///
   /// `status` 保存在 `latest_raw_json` 里，因此用 `json_extract` 读取。
   Future<void> _backfillStatusReports(String ownerId) async {
     final nowSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -349,11 +359,8 @@ FROM (
      ) AS f
 WHERE f.status IS NOT NULL
   AND f.status <> 'normal'
-  AND (
-        f.status IN ('normal_unfollowed', 'mutual_unfollowed', 'oneway_unfollowed',
-                     'temporarily_restricted', 'suspended', 'deactivated', 'recovered')
-     OR f.status IN ('unknown_error', 'unknown_gql_response', 'other_reasons')
-      )
+  AND f.status IN ('normal_unfollowed', 'mutual_unfollowed', 'oneway_unfollowed',
+                   'temporarily_restricted', 'suspended', 'deactivated', 'recovered')
   AND NOT EXISTS (
         SELECT 1 FROM change_reports c
         WHERE c.owner_id = f.owner_id

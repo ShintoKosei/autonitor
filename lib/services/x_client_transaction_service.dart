@@ -358,8 +358,11 @@ class Cubic {
 
 /// Fetches the changing X bootstrap resources used by [XClientTransactionService].
 class XClientGenerator {
-  XClientGenerator({Dio? dio}) : _dio = dio ?? Dio() {
+  XClientGenerator({Dio? dio, String? cookieHeader})
+    : _dio = dio ?? Dio(),
+      _cookieHeader = cookieHeader {
     _dio.options.headers.addAll(_headers);
+    _applyCookieHeader();
   }
 
   static const _headers = <String, String>{
@@ -387,7 +390,50 @@ class XClientGenerator {
     r'(http(?:s)?://(?:www\.)?(twitter|x){1}\.com(/x)?/migrate([/?])?tok=[a-zA-Z0-9%\-_]+)+',
   );
 
+  /// `<script src=".../ondemand.s.<hash>a.js">` form.  Not observed on the
+  /// current X shell but kept so a partial rollback still resolves.
+  static final _scriptSrcOndemandRegex = RegExp(
+    r'ondemand\.s\.([0-9a-zA-Z_]+)a\.js',
+    multiLine: true,
+  );
+
+  /// Used to decide whether a candidate page is a real app shell: the
+  /// transaction-id algorithm cannot run without this key.
+  static final _siteVerificationRegex = RegExp(
+    r'''name=["']twitter-site-verification["']\s+content=["']([^"']+)["']''',
+    multiLine: true,
+  );
+
+  /// Tried in order.  `/home` 307s to `/` when the request carries no auth
+  /// cookie, so the shell itself is also a candidate rather than a failure.
+  static const _candidatePages = <String>[
+    'https://x.com/home',
+    'https://x.com/',
+    'https://x.com/?mx=2',
+  ];
+
+  static const _maxAttempts = 3;
+
   final Dio _dio;
+  String? _cookieHeader;
+
+  /// Replaces the `Cookie` header used for the bootstrap fetch.  Passing the
+  /// owner account cookie makes X serve the authenticated shell instead of the
+  /// logged-out one, which is the only variant that can still carry the
+  /// ondemand reference.
+  void updateCookieHeader(String? cookieHeader) {
+    _cookieHeader = cookieHeader;
+    _applyCookieHeader();
+  }
+
+  void _applyCookieHeader() {
+    final cookie = _cookieHeader?.trim();
+    if (cookie == null || cookie.isEmpty) {
+      _dio.options.headers.remove('Cookie');
+    } else {
+      _dio.options.headers['Cookie'] = cookie;
+    }
+  }
 
   String? _getOndemandUrlFromHtml(String html) {
     // Python's ON_DEMAND_FILE_REGEX followed by ON_DEMAND_HASH_PATTERN.
@@ -401,15 +447,40 @@ class XClientGenerator {
     // autonitor integration working without changing the Python-compatible
     // primary parsing behaviour above.
     final directHash = _directOndemandHashRegex.firstMatch(html)?.group(1);
-    return directHash == null ? null : _ondemandUrl(directHash);
+    if (directHash != null) return _ondemandUrl(directHash);
+
+    // Plain `<script src>` reference, in case the chunk map disappears but the
+    // script tag itself survives.
+    final srcHash = _scriptSrcOndemandRegex.firstMatch(html)?.group(1);
+    return srcHash == null ? null : _ondemandUrl(srcHash);
+  }
+
+  /// Logs what the fetched page actually looks like.
+  ///
+  /// Without this the only signal was "unable to find the ondemand script URL",
+  /// which cannot distinguish a network problem from X changing its frontend.
+  void _logPageFingerprint(String url, String html) {
+    final scriptTags = RegExp(r'<script').allMatches(html).length;
+    final externalScripts = RegExp(
+      r'<script[^>]+src=',
+    ).allMatches(html).length;
+    final hasSiteKey = _siteVerificationRegex.hasMatch(html);
+    final hasAnimFrames = html.contains('loading-x-anim');
+    final isNewWebClient = html.contains('abs.twimg.com/x-web/');
+    final hasOndemand = html.contains('ondemand');
+    logger.i(
+      '[XCT] $url -> ${html.length} bytes, script=$scriptTags '
+      '(external=$externalScripts), site-key=$hasSiteKey, '
+      'anim-frames=$hasAnimFrames, x-web-client=$isNewWebClient, '
+      'ondemand=$hasOndemand',
+    );
   }
 
   static String _ondemandUrl(String hash) =>
       _ondemandTemplate.replaceFirst('{filename}', hash);
 
-  Future<String> _fetchHomePage() async {
-    logger.i('Fetching X home page for transaction-id resources.');
-    var response = await _dio.get<String>('https://x.com/home');
+  Future<String> _fetchPage(String url) async {
+    var response = await _dio.get<String>(url);
     var html = response.data ?? '';
     var document = html_parser.parse(html);
 
@@ -449,32 +520,121 @@ class XClientGenerator {
     return html;
   }
 
-  Future<XClientTransactionService> fetchService() async {
-    try {
-      final homePage = await _fetchHomePage();
-      final ondemandUrl = _getOndemandUrlFromHtml(homePage);
-      if (ondemandUrl == null) {
-        throw StateError(
-          'Unable to find the ondemand script URL on X home page.',
+  /// Fetches the best candidate page for transaction-id extraction.
+  ///
+  /// `/home` answers with a 307 to `/` when the request is not authenticated,
+  /// so the shell itself is a candidate rather than an error.  A page is only
+  /// accepted when it yields both an ondemand URL and the
+  /// `twitter-site-verification` key, otherwise the last non-empty page is
+  /// returned so the caller can report a precise reason.
+  Future<({String html, String url})> _fetchHomePage() async {
+    logger.i('Fetching X home page for transaction-id resources.');
+    Object? lastError;
+    ({String html, String url})? fallback;
+
+    for (final url in _candidatePages) {
+      try {
+        final html = await _fetchPage(url);
+        _logPageFingerprint(url, html);
+        if (html.isEmpty) {
+          logger.w('[XCT] $url returned an empty body.');
+          continue;
+        }
+        fallback ??= (html: html, url: url);
+        final usable =
+            _getOndemandUrlFromHtml(html) != null &&
+            _siteVerificationRegex.hasMatch(html);
+        if (usable) return (html: html, url: url);
+      } catch (error, stackTrace) {
+        lastError = error;
+        logger.w(
+          '[XCT] Failed to fetch $url: $error',
+          error: error,
+          stackTrace: stackTrace,
         );
       }
-      final response = await _dio.get<String>(ondemandUrl);
-      final script = response.data;
-      if (script == null || script.isEmpty) {
-        throw StateError('X ondemand script response was empty.');
-      }
-      return XClientTransactionService(
-        homePageHtml: homePage,
-        ondemandJsText: script,
-      );
-    } on DioException catch (error, stackTrace) {
-      logger.w(
-        'Unable to fetch X transaction-id resources: ${error.message}',
-        error: error,
-        stackTrace: stackTrace,
-      );
-      rethrow;
     }
+
+    if (fallback != null) return fallback;
+    throw StateError(
+      'Unable to fetch any X page for transaction-id resources'
+      '${lastError == null ? '' : ': $lastError'}',
+    );
+  }
+
+  /// Turns a non-usable page into an actionable message.
+  ///
+  /// The old one-liner ("Unable to find the ondemand script URL") could not be
+  /// told apart from a network failure.  This version records which page was
+  /// served and whether X switched to the new Vite-based client.
+  String _describeMissingOndemand(({String html, String url}) page) {
+    final hasSiteKey = _siteVerificationRegex.hasMatch(page.html);
+    final isNewWebClient = page.html.contains('abs.twimg.com/x-web/');
+    final buffer = StringBuffer(
+      'Unable to find the ondemand script URL on X home page '
+      '(url=${page.url}, ${page.html.length} bytes, '
+      'site-key=$hasSiteKey, x-web-client=$isNewWebClient).',
+    );
+    if (isNewWebClient) {
+      buffer.write(
+        ' X now serves the Vite-based x-web client, which no longer ships '
+        'responsive-web/client-web/ondemand.s.<hash>a.js, so the legacy '
+        'ClientTransaction algorithm cannot derive a transaction id from it. '
+        'Requests continue without the optional X-Client-Transaction-Id header.',
+      );
+    }
+    return buffer.toString();
+  }
+
+  Future<XClientTransactionService> fetchService() async {
+    Object? lastError;
+    for (var attempt = 1; attempt <= _maxAttempts; attempt++) {
+      try {
+        final page = await _fetchHomePage();
+        final ondemandUrl = _getOndemandUrlFromHtml(page.html);
+        if (ondemandUrl == null) {
+          // A frontend change is not transient: retrying cannot help, and the
+          // caller degrades gracefully anyway.
+          throw StateError(_describeMissingOndemand(page));
+        }
+        final response = await _dio.get<String>(ondemandUrl);
+        final script = response.data;
+        if (script == null || script.isEmpty) {
+          throw StateError('X ondemand script response was empty.');
+        }
+        return XClientTransactionService(
+          homePageHtml: page.html,
+          ondemandJsText: script,
+        );
+      } on DioException catch (error, stackTrace) {
+        lastError = error;
+        logger.w(
+          'Unable to fetch X transaction-id resources: ${error.message}',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      } catch (error, stackTrace) {
+        final message = error is StateError ? error.message : '$error';
+        if (message.contains('ondemand')) rethrow;
+        lastError = error;
+        logger.w(
+          'Unable to build X transaction-id service: $error',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+
+      if (attempt < _maxAttempts) {
+        final delay = Duration(milliseconds: 400 * attempt * attempt);
+        logger.i(
+          '[XCT] Retrying transaction-id bootstrap in '
+          '${delay.inMilliseconds}ms (attempt ${attempt + 1}/$_maxAttempts).',
+        );
+        await Future<void>.delayed(delay);
+      }
+    }
+    if (lastError != null) throw lastError;
+    throw StateError('Unable to build X transaction-id service.');
   }
 
   Future<String?> fetchAndGenerateTransactionId({
