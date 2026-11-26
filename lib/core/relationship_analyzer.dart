@@ -20,6 +20,9 @@ const String kStatusLookupFailed = 'lookup_failed';
 /// The account still exists and is reachable.
 const String kStatusNormal = 'normal';
 
+/// 单条状态查询的最大次数，防止长时间未同步后的积压把请求量放大。
+const int _maxSingleStatusLookups = 80;
+
 typedef LogCallback = void Function(String message);
 
 String? classifyKeptRelationshipChange({
@@ -314,10 +317,12 @@ class RelationshipAnalyzer {
   /// fetched follower/following sets).
   ///
   /// Strategy, in order:
-  ///  1. `UsersByRestIds` (batch). Ids are unambiguous, so this is preferred.
+  ///  1. `UsersByRestIds` (batch). Ids are unambiguous, so this is preferred —
+  ///     but X has been rejecting this operation since 2026-09.
   ///  2. `UsersByScreenNames` (batch, using the stored screen name). This is the
-  ///     same operation the profile-enrichment stage uses every sync, so it
-  ///     keeps working when the ByRestId family is rejected by the API.
+  ///     same operation the profile-enrichment stage uses every sync.
+  ///  3. `UserByRestId` one user at a time. A different operation from the batch
+  ///     one, and still working (the owner-profile refresh uses it).
   ///
   /// Anything still unresolved is reported as [kStatusLookupFailed]; callers
   /// must treat that as "unknown" and never as a relationship verdict.
@@ -335,6 +340,13 @@ class RelationshipAnalyzer {
 
     if (unresolved.isNotEmpty) {
       await _lookupStatusesByScreenNames(unresolved, results, oldRelationsMap);
+      unresolved.removeWhere(results.containsKey);
+    }
+
+    // 逐条兜底：`UserByRestId` 与批量接口是两套 operation，批量那套被 X 改动
+    // 之后单条仍然可用（账号资料刷新每次同步都在用它）。
+    if (unresolved.isNotEmpty) {
+      await _lookupStatusesBySingleRestId(unresolved, results);
       unresolved.removeWhere(results.containsKey);
     }
 
@@ -427,6 +439,67 @@ class RelationshipAnalyzer {
           'UsersByRestIds failed for batch $start..${end - 1}: '
           '${_describeError(e)}',
         );
+      }
+    }
+  }
+
+  /// 逐条查询单个用户的当前状态。
+  ///
+  /// 批量接口 `UsersByRestIds` 被 X 改动后一直失败，而单条 `UserByRestId` 仍然
+  /// 可用，因此这里作为最后的精确兜底。数量有上限，避免一次积压几百人时把
+  /// 请求量放大到触发限流。
+  Future<void> _lookupStatusesBySingleRestId(
+    Set<String> ids,
+    Map<String, String> results,
+  ) async {
+    final String queryId = _accountRepository.getCurrentQueryId('UserByRestId');
+    final featureSwitches = _accountRepository.getFeatureSwitches(
+      'UserByRestId',
+    );
+    final fieldToggles = _accountRepository.getFieldToggles('UserByRestId');
+    var processed = 0;
+
+    for (final id in ids) {
+      if (processed >= _maxSingleStatusLookups) {
+        _log(
+          'Status lookup stopped after $_maxSingleStatusLookups single-user '
+          'requests; ${ids.length - processed} users fall back to their '
+          'relationship flags.',
+        );
+        break;
+      }
+      await _checkPauseCallback();
+      processed++;
+      try {
+        final transactionId = _xctService?.generateTransactionId(
+          method: "GET",
+          url: 'https://api.x.com/graphql/$queryId/UserByRestId',
+        );
+        final Map<String, dynamic> gqlJson = await _retryAfterRateLimit(
+          () => _apiServiceGql.getUserByRestId(
+            id,
+            _ownerCookie,
+            queryId,
+            transactionId: transactionId,
+            extraFeatureSwitches: featureSwitches,
+            extraFieldToggles: fieldToggles,
+            apiRequestMode: _apiRequestMode,
+            cffiUrl: _cffiUrl,
+            cffiApiKey: _cffiApiKey,
+          ),
+        );
+        final dynamic userNode = gqlJson['data']?['user'];
+        if (userNode == null || (userNode is Map && userNode.isEmpty)) {
+          results[id] = 'deactivated';
+          continue;
+        }
+        final status = _classifyGqlUserResult(
+          userNode is Map ? userNode['result'] : null,
+          missingMeansUnavailable: true,
+        );
+        if (status != kStatusLookupFailed) results[id] = status;
+      } catch (e) {
+        _log('UserByRestId failed for $id: ${_describeError(e)}');
       }
     }
   }
